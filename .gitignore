@@ -1,9 +1,16 @@
+# Build output
+/build/
 /temp
+
+# Compiled binaries (built via CMake into build/, not committed)
+client/client
+tracker/tracker
+
+# Editor / tooling
 /.vscode
-work.txt
 /.history
-.gitignore
-2025201093_A3.zip
-b.bin
-c.bin
-1.py
+
+# Runtime state produced by running the tracker/client
+*.downloading
+tracker_state.json
+tracker_state.json.tmp
