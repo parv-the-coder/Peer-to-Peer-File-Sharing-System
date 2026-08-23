@@ -21,6 +21,7 @@
 #include <openssl/evp.h>
 #include <atomic>
 
+#include "common/hash.h"
 #include "common/message.h"
 #include "common/socket_io.h"
 
@@ -29,7 +30,7 @@ using p2p::recv_framed;
 using p2p::send_framed;
 using p2p::split_args;
 
-static const size_t PIECE_SIZE = 512 * 1024; // 512KB piece size
+static const size_t PIECE_SIZE = p2p::kPieceSize; // 512KB piece size
 
 // globals
 string peername; // name of peer
@@ -57,8 +58,6 @@ struct DownloadInfo
 unordered_map<string, DownloadInfo> active_downloads; // filename to download info
 mutex downloads_mtx; // mutex for downloads
 
-string filehash(const string &filepath); // function for file hash
-vector<string> compute_piece_hashes(const string &filepath, long long &num_pieces); // function for piece hashes
 
 void displaycomds() 
 {
@@ -263,69 +262,7 @@ string sendcomd(int sock, const string &cmd)
     return resp;
 }
 
-string filehash(const string &filepath) 
-{
-    int fd = open(filepath.c_str(), O_RDONLY);
-    if (fd < 0) return "";
-    
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new(); // hash context
-    EVP_DigestInit_ex(ctx, EVP_sha1(), NULL); // init hash
-    char buf[524288]; // buffer
-    ssize_t n;
-    
-    while ((n = read(fd, buf, sizeof(buf))) > 0) 
-    {
-        EVP_DigestUpdate(ctx, buf, n); // updating hash
-    }
-    close(fd);
-    
-    unsigned char hash[EVP_MAX_MD_SIZE]; unsigned int len;
-    EVP_DigestFinal_ex(ctx, hash, &len); // finishes hashing
-    EVP_MD_CTX_free(ctx); // freeingg
-    
-    char hex[41];
-    for (unsigned int i = 0; i < len; ++i) 
-    {
-        sprintf(hex + i*2, "%02x", hash[i]); // to hex
-    }
-    
-    hex[40] = 0;
-    return string(hex);
-}
-
-vector<string> compute_piece_hashes(const string &filepath, long long &num_pieces) 
-{
-    vector<string> hashes; // hashes vector
-    int fd = open(filepath.c_str(), O_RDONLY); 
-    if (fd < 0) 
-    { 
-        num_pieces = 0; 
-        return hashes; 
-    }
-    
-    off_t filesize = lseek(fd, 0, SEEK_END); // get size of file
-    lseek(fd, 0, SEEK_SET); // resetting
-    num_pieces = (filesize + PIECE_SIZE - 1) / PIECE_SIZE; // calc pieces
-    
-    for (long long i = 0; i < num_pieces; ++i) 
-    {
-        vector<char> buf(PIECE_SIZE); 
-        ssize_t n = read(fd, buf.data(), PIECE_SIZE); // read piece
-        if (n <= 0) break; 
-        EVP_MD_CTX *ctx = EVP_MD_CTX_new(); // hash context
-        EVP_DigestInit_ex(ctx, EVP_sha1(), NULL); // init hash
-        EVP_DigestUpdate(ctx, buf.data(), n); // update hash
-        unsigned char hash[EVP_MAX_MD_SIZE]; unsigned int hlen;
-        EVP_DigestFinal_ex(ctx, hash, &hlen); // finish hash
-        EVP_MD_CTX_free(ctx); // free context
-        char hex[41]; for (unsigned int j=0;j<hlen;j++) sprintf(hex+j*2,"%02x",hash[j]); hex[40]=0;
-        hashes.push_back(string(hex)); // add hash
-    }
-    close(fd);
-    return hashes;
-}
-
-int main(int argc, char *argv[]) 
+int main(int argc, char *argv[])
 {
     if (argc != 3) 
     { 
@@ -610,8 +547,8 @@ int main(int argc, char *argv[])
                 }
                 // compute piece hashes and full hash
                 long long num_pieces = 0; // pieces
-                vector<string> piece_hashes = compute_piece_hashes(fpath, num_pieces); // get hashes
-                string fullhash = filehash(fpath); // get full hash
+                vector<string> piece_hashes = p2p::sha1_file_pieces(fpath, num_pieces); // get hashes
+                string fullhash = p2p::sha1_file_hex(fpath); // get full hash
                 size_t pos = fpath.find_last_of("/"); // find last /
                 string fname = (pos == string::npos) ? fpath : fpath.substr(pos + 1); // get file name
                 // store file locally so peer server can serve pieces
@@ -881,18 +818,7 @@ int main(int argc, char *argv[])
                                 size_t piece_size = piece_payload.size();
                                 vector<char> buffer(piece_payload.begin(), piece_payload.end());
 
-                                EVP_MD_CTX *ctx = EVP_MD_CTX_new(); // hash context
-                                EVP_DigestInit_ex(ctx, EVP_sha1(), NULL); // init hash
-                                EVP_DigestUpdate(ctx, buffer.data(), piece_size); // update hash
-                                unsigned char hash[EVP_MAX_MD_SIZE];
-                                unsigned int hlen;
-                                EVP_DigestFinal_ex(ctx, hash, &hlen); // finish hash
-                                EVP_MD_CTX_free(ctx); // free context
-
-                                char hex[41];
-                                for (unsigned int i=0;i<hlen;i++) sprintf(hex+i*2,"%02x",hash[i]);
-                                hex[40]=0;
-                                string recv_hex(hex); // get hash
+                                string recv_hex = p2p::sha1_hex(buffer.data(), piece_size); // get hash
 
                                 if (recv_hex != piece_hashes[piece_idx]) {
                                     cout << "[Piece " << piece_idx << "] Hash mismatch! Expected: " << piece_hashes[piece_idx] << ", Got: " << recv_hex << endl;
@@ -1029,7 +955,7 @@ int main(int argc, char *argv[])
                 }
 
                 // full file hash verification
-                string dhash = filehash(fullout); // get hash
+                string dhash = p2p::sha1_file_hex(fullout); // get hash
                 if (dhash == fullhash) 
                 {
                     cout << "[C] " << gid << " " << fname << " downloaded successfully.\n";
