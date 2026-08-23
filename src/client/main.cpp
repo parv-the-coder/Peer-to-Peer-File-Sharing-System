@@ -21,7 +21,13 @@
 #include <openssl/evp.h>
 #include <atomic>
 
+#include "common/message.h"
+#include "common/socket_io.h"
+
 using namespace std;
+using p2p::recv_framed;
+using p2p::send_framed;
+using p2p::split_args;
 
 static const size_t PIECE_SIZE = 512 * 1024; // 512KB piece size
 
@@ -108,28 +114,17 @@ bool poolstop = false; // stop flag
 // serve peer requests
 void handling_peer_req(int peersock) 
 {
-    char buff[4096]; // buffer
-    memset(buff, 0, sizeof(buff)); // clear buffer
-    int bytrd = read(peersock, buff, sizeof(buff) - 1); // read from socket
-    
-    // if nothing read, close
-    if (bytrd <= 0) 
-    { 
-        close(peersock); 
-        return; 
-    } 
+    string buff;
+    if (!recv_framed(peersock, buff))
+    {
+        close(peersock);
+        return;
+    }
 
-    vector<string> comds;
-    char *token = strtok(buff, " "); // splitting by space
-    
-    while (token) 
-    { 
-        comds.push_back(token); 
-        token = strtok(NULL, " "); 
-    } 
-    
-    if (comds.empty()) 
-    { 
+    vector<string> comds = split_args(buff);
+
+    if (comds.empty())
+    {
         close(peersock); 
         return; 
     } 
@@ -169,27 +164,12 @@ void handling_peer_req(int peersock)
         vector<char> buf(PIECE_SIZE);
         ssize_t n = pread(fd, buf.data(), PIECE_SIZE, offset);
         close(fd);
-        
-        if (n > 0) 
+
+        if (n > 0)
         {
-            // sending piece size first, then piece data
-            uint32_t piece_size = htonl(n); // piece size
-            size_t total_sent = 0; // sent bytes
-            while (total_sent < sizeof(piece_size)) 
-            {
-                ssize_t sent = send(peersock, (char*)&piece_size + total_sent, sizeof(piece_size) - total_sent, 0); // send size
-                if (sent <= 0) break; // checking sent
-                total_sent += sent; // adding sent
-            }
-            
-            // sending piece data
-            total_sent = 0; // resetting sent
-            while (total_sent < n) 
-            {
-                ssize_t sent = send(peersock, buf.data() + total_sent, n - total_sent, 0); // send data
-                if (sent <= 0) break; // checking sent
-                total_sent += sent; // adding sent
-            }
+            // piece payload is framed the same way as every other message:
+            // [4-byte length][data]
+            send_framed(peersock, string(buf.data(), n));
         }
     }
     close(peersock);
@@ -267,23 +247,20 @@ void handling_peer_conn(string ip, string port)
     close(sock);
 }
 
-string sendcomd(int sock, const string &cmd) 
+string sendcomd(int sock, const string &cmd)
 {
-    ssize_t sent = send(sock, cmd.c_str(), cmd.size(), 0);
-    if (sent < 0) 
-    { 
-        perror("send failed"); 
-        return ""; 
-    } 
-    char buff[2097152];
-    memset(buff, 0, sizeof(buff));
-    ssize_t recvd = read(sock, buff, sizeof(buff) - 1);
-    if (recvd < 0) 
-    { 
-        perror("read failed"); 
-        return ""; 
-    } 
-    return string(buff, recvd); 
+    if (!send_framed(sock, cmd))
+    {
+        cout << "------- Failed to send command to tracker -------" << endl;
+        return "";
+    }
+    string resp;
+    if (!recv_framed(sock, resp))
+    {
+        cout << "------- Failed to read response from tracker -------" << endl;
+        return "";
+    }
+    return resp;
 }
 
 string filehash(const string &filepath) 
@@ -670,19 +647,6 @@ int main(int argc, char *argv[])
                     }
                 }
 
-                // read all bytes from a socket
-                auto read_all = [](int sock, char *buf, size_t n) -> bool 
-                {
-                    size_t total = 0;
-                    while (total < n) 
-                    {
-                        ssize_t r = read(sock, buf + total, n - total); 
-                        if (r <= 0) return false; 
-                        total += r; 
-                    }
-                    return true; 
-                };
-
                 // query tracker for file metadata and peers
                 string tracker_cmd = "download_file " + gid + " " + fname + " " + peername; 
                 
@@ -900,32 +864,22 @@ int main(int argc, char *argv[])
                                 }
 
                                 string preq = "GET_PIECE " + fname + " " + to_string(piece_idx);
-                                if (send(psock, preq.c_str(), preq.size(), 0) < 0) 
+                                if (!send_framed(psock, preq))
                                 {
                                     close(psock);
                                     continue;
                                 }
 
-                                uint32_t piece_size;
-                                if (!read_all(psock, (char*)&piece_size, sizeof(piece_size))) 
-                                { 
-                                    close(psock); 
-                                    continue; 
+                                string piece_payload;
+                                if (!recv_framed(psock, piece_payload, PIECE_SIZE))
+                                {
+                                    close(psock);
+                                    continue;
                                 }
-                                piece_size = ntohl(piece_size); 
-                                if (piece_size > PIECE_SIZE) 
-                                { 
-                                    close(psock); 
-                                    continue; 
-                                }
-
-                                vector<char> buffer(piece_size); 
-                                if (!read_all(psock, buffer.data(), piece_size)) 
-                                { 
-                                    close(psock); 
-                                    continue; 
-                                }   
                                 close(psock);
+
+                                size_t piece_size = piece_payload.size();
+                                vector<char> buffer(piece_payload.begin(), piece_payload.end());
 
                                 EVP_MD_CTX *ctx = EVP_MD_CTX_new(); // hash context
                                 EVP_DigestInit_ex(ctx, EVP_sha1(), NULL); // init hash

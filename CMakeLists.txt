@@ -10,8 +10,15 @@ endif()
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 
+add_library(p2p_common STATIC
+  src/common/socket_io.cpp
+  src/common/message.cpp
+)
+target_include_directories(p2p_common PUBLIC src)
+target_link_libraries(p2p_common PUBLIC Threads::Threads)
+
 add_executable(tracker src/tracker/main.cpp)
-target_link_libraries(tracker PRIVATE Threads::Threads)
+target_link_libraries(tracker PRIVATE p2p_common)
 
 add_executable(client src/client/main.cpp)
-target_link_libraries(client PRIVATE OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+target_link_libraries(client PRIVATE p2p_common OpenSSL::SSL OpenSSL::Crypto)

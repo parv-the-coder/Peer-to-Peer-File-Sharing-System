@@ -10,10 +10,16 @@
 #include <string> 
 #include <unordered_map> 
 #include <stdlib.h> 
-#include <unordered_set> 
-#include <sstream> 
+#include <unordered_set>
+#include <sstream>
+
+#include "common/message.h"
+#include "common/socket_io.h"
 
 using namespace std;
+using p2p::recv_framed;
+using p2p::send_framed;
+using p2p::split_args;
 
 // representing peer/client in the P2P network
 struct client 
@@ -127,23 +133,22 @@ void managepeer(int peersocket)
     // main loop which read and process commands from peer
     while (1) 
     {
-        // incoming command from socket
-        char buff[512000];              // buffer
-        memset(buff, 0, sizeof(buff));  // clear buffer
-
-        int bytrd = read(peersocket, buff, sizeof(buff)); // read
-
-        if (bytrd == 0) 
+        // incoming command from socket, framed as [4-byte length][payload]
+        // so a command that spans multiple TCP segments (e.g. upload_file
+        // with hundreds of piece hashes) is never mistaken for complete
+        // after a single read()
+        string buff;
+        if (!recv_framed(peersocket, buff))
         {
-            cout << "Socket received 0 bytes: " << peersocket << endl;
-            
+            cout << "Connection closed or errored: " << peersocket << endl;
+
             // on disconnect, transfer group ownership if required
-            if (!disconnecting_user.empty()) 
+            if (!disconnecting_user.empty())
             {
-                for (auto &gpair : groups) 
+                for (auto &gpair : groups)
                 {
                     group *grp = gpair.second;
-                    if (grp->groupmaster == disconnecting_user) 
+                    if (grp->groupmaster == disconnecting_user)
                     {
                         grp->deluser(disconnecting_user); // removing master
                     }
@@ -151,24 +156,17 @@ void managepeer(int peersocket)
             }
             return;
         }
-        
+
         cout << "Incoming command from socket " << peersocket << ": " << buff << endl;
 
-        // tokenizse command string into args
-        vector<string> comds;               // commands
-        char *token = strtok(buff, " ");    // spliting
-        
-        while (token != NULL) 
-        {
-            comds.push_back(token); // adding
-            token = strtok(NULL, " ");
-        }
-        
+        // tokenize command string into args
+        vector<string> comds = split_args(buff); // commands
+
         // handling commands checking that it should have at least one token
         if (comds.empty()) 
         {
             string msg = "Invalid command";
-            send(peersocket, msg.c_str(), msg.size(), 0);
+            send_framed(peersocket, msg);
             continue;
         }
 
@@ -184,19 +182,19 @@ void managepeer(int peersocket)
             if (comds.size() != 3) 
             {
                 string msg = "-----Invalid Arguments-----"; 
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else if (isuserpresent(comds[1])) 
             {
                 string msg = "-----Cannot create user: ID already in use.-----";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else 
             {
                 client* peer = new client(comds[1], comds[2]); // new user
                 peers[comds[1]] = peer; // add user
                 string msg = "***** ID number " + comds[1] + " registered successfully! ******";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
                 cout << "****** ID " << comds[1] << " has been registered as a new user. ******" << endl;
             }
         }
@@ -207,23 +205,23 @@ void managepeer(int peersocket)
             if (comds.size() < 5) 
             {
                 string msg = "-----Invalid Arguments for login-----";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             }
             else if (!isuserpresent(comds[1])) 
             {
                 string msg = "------ User ID " + comds[1] + " is not registered ------";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else if (peers[comds[1]]->passcode != comds[2]) 
             {
                 string msg = "------ Authentication failed: incorrect passcode for ID " + comds[1] + " ------";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else 
             {
                 peers[comds[1]]->login(comds[3], comds[4]);
                 string msg = "Successful Login for User ID " + comds[1] + "! ******\n";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             }
         }
 
@@ -233,18 +231,18 @@ void managepeer(int peersocket)
             if (comds.size() < 2) 
             {
                 string msg = "-----Invalid Arguments-----";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else if (!isuserpresent(comds[1])) 
             {
                 string msg = "------- No such User ID: " + comds[1] + " ------";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else 
             {
                 peers[comds[1]]->logout(); // logout
                 string msg = "***** User ID " + comds[1] + " logged out successfully ******";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             }
         }
 
@@ -254,24 +252,24 @@ void managepeer(int peersocket)
             if (comds.size() < 3) 
             {
                 string msg = "-----Invalid Arguments-----";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else if (!isuserpresent(comds[2])) 
             {
                 string msg = "------- No such User ID: " + comds[2] + " ------";
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (isgrouppresent(comds[1])) 
             {
                 string msg = "------- This Group ID is already taken ------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else 
             {
                 group * initgrp = new group(comds[1], comds[2]); // creating new group
                 groups[comds[1]] = initgrp; // adding group
                 string msg = "******* Group creation successful. Assigned ID: " + comds[1] + " *******";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             }
         }
 
@@ -281,28 +279,28 @@ void managepeer(int peersocket)
             if (comds.size() < 3) 
             {
                 string msg = "-----Invalid Arguments-----"; 
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else if (!isuserpresent(comds[2])) 
             {
                 string msg = "------- No such User ID: " + comds[2] + " ------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             }
             else if (!isgrouppresent(comds[1])) 
             {
                 string msg = "------- No such group ID: " + comds[1] + " ------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (groups[comds[1]]->partofgroup(comds[2])) 
             {
                 string msg = "------- You have already joined this group: " + comds[1] + " -------";
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else 
             {
                 groups[comds[1]]->applicants.insert(comds[2]); // add request
                 string msg = "******* Request to join group " + comds[1] + " has been sent ******";
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             }
         }
 
@@ -312,28 +310,28 @@ void managepeer(int peersocket)
             if (comds.size() < 3) 
             {
                 string msg = "-----Invalid Arguments-----"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (!isuserpresent(comds[2])) 
             {
                 string msg = "------- No such User ID: " + comds[2] + " ------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else if (!isgrouppresent(comds[1])) 
             {
                 string msg = "------- No such group ID: " + comds[1] + " ------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (!groups[comds[1]]->partofgroup(comds[2])) 
             {
                 string msg = "------ Access denied. You are not part of Group ID " + comds[1] + " -------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else 
             {
                 groups[comds[1]]->deluser(comds[2]); // removing user
                 string msg = "****** Left group successfully. ID: " + comds[1] + " ******";
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             }
         }
 
@@ -343,29 +341,29 @@ void managepeer(int peersocket)
             if (comds.size() < 3) 
             {
                 string msg = "-----Invalid Arguments-----"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (!isuserpresent(comds[2])) 
             {
                 string msg = "------- No such User ID: " + comds[2] + " ------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (!isgrouppresent(comds[1])) 
             {
                 string msg = "------- No such group ID: " + comds[1] + " ------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (groups[comds[1]]->groupmaster != comds[2]) 
             {
                 string msg = "------ Access denied. You are not the group owner of ID " + comds[1] + " -------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else 
             {
                 string msg = ""; // message
                 for (const auto &user : groups[comds[1]]->applicants) msg += user + "\n"; // add requests
                 if (msg == "") msg = "------- Group ID " + comds[1] + " has no pending join requests -------"; // no requests
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             }
         }
 
@@ -375,33 +373,33 @@ void managepeer(int peersocket)
             if (comds.size() < 4) 
             {
                 string msg = "-----Invalid Arguments-----"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (!isuserpresent(comds[2])) 
             {
                 string msg = "------- No such User ID: " + comds[2] + " ------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (!isgrouppresent(comds[1])) 
             {
                 string msg = "------- No such group ID: " + comds[1] + " ------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (groups[comds[1]]->groupmaster != comds[3]) 
             {
                 string msg = "------ Access denied. You are not the group owner of ID " + comds[1] + " -------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else if (!groups[comds[1]]->isapplicant(comds[2])) 
             {
                 string msg = "------- This user (ID: " + comds[2] + ") has no pending requests -------"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else 
             {
                 groups[comds[1]]->acceptreq(comds[2]); // accept
                 string msg = "******* Approval granted for User ID: " + comds[2] + " *******"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             }
         }
 
@@ -414,7 +412,7 @@ void managepeer(int peersocket)
                 msg += "\n" + it->first; // adding group
             }
             if (msg == "") msg = "-------- Currently, no groups are available. -------"; // no groups are there
-            send(peersocket, msg.c_str(), msg.size(), 0);
+            send_framed(peersocket, msg);
         }
 
     // upload_file <gid> <filename> <filePath>
@@ -423,7 +421,7 @@ void managepeer(int peersocket)
             if (comds.size() < 4) 
             {
                 string msg = "-----Invalid Arguments for upload_file-----";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else 
             {
@@ -437,12 +435,12 @@ void managepeer(int peersocket)
                 if (!isgrouppresent(gid)) 
                 {
                     string msg = "------- No such group ID: " + gid + " ------"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else if (!isuserpresent(uname) || !groups[gid]->partofgroup(uname)) 
                 {
                     string msg = "------ You are not part of Group ID " + gid + " -------"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else 
                 {
@@ -467,7 +465,7 @@ void managepeer(int peersocket)
                     group_files[gid].insert(fname); // adding file
 
                     string msg = "******* File " + fname + " uploaded to group " + gid + " successfully *******"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                     cout << "Tracker: Registered file " << fname << " size " << fsize << " pieces " << num_pieces << endl; 
                 }
             }
@@ -479,7 +477,7 @@ void managepeer(int peersocket)
             if (comds.size() < 3) 
             {
                 string msg = "-----Invalid Arguments-----"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else 
             {
@@ -488,12 +486,12 @@ void managepeer(int peersocket)
                 if (!isgrouppresent(gid)) 
                 {
                     string msg = "------- No such group ID: " + gid + " ------"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else if (!isuserpresent(uname) || !groups[gid]->partofgroup(uname)) 
                 {
                     string msg = "------ Access denied. You are not part of Group ID " + gid + " -------"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else 
                 {
@@ -511,7 +509,7 @@ void managepeer(int peersocket)
                             msg += fname + " SIZE:" + to_string(fm.size) + " PIECES:" + to_string(fm.num_pieces) + "\n"; // adding file
                         }
                     }
-                    send(peersocket, msg.c_str(), msg.size(), 0);
+                    send_framed(peersocket, msg);
                 }
             }
         }
@@ -523,7 +521,7 @@ void managepeer(int peersocket)
             if (comds.size() < 4) 
             {
                 string msg = "-----Invalid Arguments for download_file-----";
-                send(peersocket, msg.c_str(), msg.size(), 0);
+                send_framed(peersocket, msg);
             } 
             else 
             {
@@ -534,17 +532,17 @@ void managepeer(int peersocket)
                 if (!isgrouppresent(gid)) 
                 {
                     string msg = "------- No such group ID: " + gid + " ------"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else if (!isuserpresent(uname) || !groups[gid]->partofgroup(uname)) 
                 {
                     string msg = "------ Access denied. You are not part of Group ID " + gid + " -------"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else if (group_files[gid].find(fname) == group_files[gid].end()) 
                 {
                     string msg = "------- No such file in group " + gid + " -------"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else 
                 {
@@ -564,7 +562,7 @@ void managepeer(int peersocket)
                         }
                     }
                     msg += "\n";
-                    send(peersocket, msg.c_str(), msg.size(), 0);
+                    send_framed(peersocket, msg);
                 }
             }
         }
@@ -576,7 +574,7 @@ void managepeer(int peersocket)
             if (comds.size() != 4) 
             {
                 string msg = "-----Invalid Arguments for file_downloaded-----"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } 
             else 
             {
@@ -596,24 +594,24 @@ void managepeer(int peersocket)
                                 files[filename].peers.insert(peername); // adding peer
                             }
                             string msg = "SUCCESS: Peer " + peername + " registered as seeder for " + filename;
-                            send(peersocket, msg.c_str(), msg.size(), 0); 
+                            send_framed(peersocket, msg); 
                         } 
                         else 
                         {
                             string msg = "ERROR: Peer not found"; 
-                            send(peersocket, msg.c_str(), msg.size(), 0); 
+                            send_framed(peersocket, msg); 
                         }
                     } 
                     else 
                     {
                         string msg = "ERROR: File not found in group"; 
-                        send(peersocket, msg.c_str(), msg.size(), 0); 
+                        send_framed(peersocket, msg); 
                     }
                 } 
                 else 
                 {
                     string msg = "ERROR: Group not found or peer not member"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 }
             }
         }
@@ -625,7 +623,7 @@ void managepeer(int peersocket)
             if (comds.size() != 4) 
             {
                 string msg = "-----Invalid Arguments for stop_share-----"; 
-                send(peersocket, msg.c_str(), msg.size(), 0); 
+                send_framed(peersocket, msg); 
             } else {
                 string gid = comds[1]; // group id
                 string filename = comds[2]; // file name
@@ -633,22 +631,22 @@ void managepeer(int peersocket)
                 if (!isgrouppresent(gid)) 
                 {
                     string msg = "ERROR: Group not found"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else if (!isuserpresent(peername) || groups[gid]->participants.find(peername) == groups[gid]->participants.end()) 
                 {
                     string msg = "ERROR: Peer not found or not member of group"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else if (group_files[gid].find(filename) == group_files[gid].end()) 
                 {
                     string msg = "ERROR: File not found in group"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else if (files.find(filename) == files.end()) 
                 {
                     string msg = "ERROR: File metadata not found"; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 } 
                 else 
                 {
@@ -658,7 +656,7 @@ void managepeer(int peersocket)
                         peers[peername]->filmaptopath.erase(filename); // removing file
                     }
                     string msg = "SUCCESS: Peer " + peername + " stopped sharing " + filename + " in group " + gid; 
-                    send(peersocket, msg.c_str(), msg.size(), 0); 
+                    send_framed(peersocket, msg); 
                 }
             }
         }
@@ -667,7 +665,7 @@ void managepeer(int peersocket)
         else 
         {
             string msg = "Unrecognized command"; 
-            send(peersocket, msg.c_str(), msg.size(), 0); 
+            send_framed(peersocket, msg); 
         }
     }
 }
