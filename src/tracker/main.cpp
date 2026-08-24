@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "common/hash.h"
 #include "common/message.h"
 #include "common/socket_io.h"
 #include "tracker/tracker_state.h"
@@ -86,8 +87,26 @@ static string dispatch(const vector<string> &comds)
         // check only required 4 tokens but then read comds[4..6]
         // unconditionally, so a short upload_file read past the end.
         if (n < 7) return "-----Invalid Arguments for upload_file-----";
-        long long fsize = atoll(comds[4].c_str());
-        int num_pieces = stoi(comds[6]);
+        long long fsize = 0;
+        int num_pieces = 0;
+        if (!p2p::parse_ll(comds[4], fsize) || !p2p::parse_int(comds[6], num_pieces))
+        {
+            return "-----Invalid Arguments for upload_file-----";
+        }
+        if (fsize < 0 || num_pieces < 0)
+        {
+            return "-----Invalid Arguments for upload_file-----";
+        }
+        // The piece count must agree with the size, and the hash list must
+        // be exactly that long. Without this an unvalidated num_pieces is
+        // an allocation bomb: the tracker would resize a vector to whatever
+        // the client claimed.
+        long long expected =
+            (fsize + (long long)p2p::kPieceSize - 1) / (long long)p2p::kPieceSize;
+        if ((long long)num_pieces != expected || n != (size_t)num_pieces + 7)
+        {
+            return "-----Invalid Arguments for upload_file-----";
+        }
         vector<string> piece_hashes;
         for (size_t i = 7; i < n; ++i)
         {
@@ -212,7 +231,12 @@ int main(int argc, char *argv[])
     // binding server to IP and port
     serveradd.sin_family = AF_INET;
     serveradd.sin_addr.s_addr = INADDR_ANY; // any address
-    int port = stoi(serverport); // port
+    int port = 0;
+    if (!p2p::parse_int(serverport, port) || port <= 0 || port > 65535)
+    {
+        cout << "Invalid port in tracker info file: " << serverport << endl;
+        return 1;
+    }
     serveradd.sin_port = htons(port); // setting port
 
     if (bind(serversock, (struct sockaddr *)&serveradd, sizeof(serveradd)) < 0)

@@ -138,7 +138,14 @@ void handling_peer_req(int peersock)
         }
 
         string fname = comds[1]; // file name
-        int index = stoi(comds[2]); // piece index
+        int index = 0; // piece index
+        // Peer-supplied: stoi would throw on garbage and, on a worker
+        // thread, terminate the whole client.
+        if (!p2p::parse_int(comds[2], index))
+        {
+            close(peersock);
+            return;
+        }
 
         if (index < 0) 
         { 
@@ -214,7 +221,13 @@ void handling_peer_conn(string ip, string port)
     }
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY; // any address
-    addr.sin_port = htons(stoi(port)); // port
+    int listen_port = 0;
+    if (!p2p::parse_int(port, listen_port) || listen_port <= 0 || listen_port > 65535)
+    {
+        cout << "------- Invalid listening port: " << port << " -------" << endl;
+        return;
+    }
+    addr.sin_port = htons(listen_port); // port
 
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
     {
@@ -316,7 +329,13 @@ int main(int argc, char *argv[])
 
     struct sockaddr_in server_addr; 
     server_addr.sin_family = AF_INET; 
-    int port = stoi(serverport); 
+    int port = 0;
+    if (!p2p::parse_int(serverport, port) || port <= 0 || port > 65535)
+    {
+        cout << "Invalid tracker port in config: " << serverport << endl;
+        return 1;
+    }
+    
     server_addr.sin_port = htons(port); 
     
     if (inet_pton(AF_INET, serverip.c_str(), &server_addr.sin_addr) <= 0) 
@@ -786,7 +805,13 @@ int main(int argc, char *argv[])
 
                                 struct sockaddr_in addr; 
                                 addr.sin_family = AF_INET; 
-                                addr.sin_port = htons(stoi(pport)); 
+                                int peer_port = 0;
+                                if (!p2p::parse_int(pport, peer_port) || peer_port <= 0 || peer_port > 65535)
+                                {
+                                    close(psock);
+                                    continue;
+                                }
+                                addr.sin_port = htons(peer_port); 
                                 if (inet_pton(AF_INET, pip.c_str(), &addr.sin_addr) <= 0) 
                                 {
                                     close(psock);
