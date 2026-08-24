@@ -20,7 +20,10 @@ add_library(p2p_common STATIC
 target_include_directories(p2p_common PUBLIC src)
 target_link_libraries(p2p_common PUBLIC Threads::Threads OpenSSL::Crypto)
 
-add_executable(tracker src/tracker/main.cpp)
+add_executable(tracker
+  src/tracker/main.cpp
+  src/tracker/tracker_state.cpp
+)
 target_link_libraries(tracker PRIVATE p2p_common)
 
 add_executable(client src/client/main.cpp)

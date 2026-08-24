@@ -1,698 +1,186 @@
-#include <unistd.h>    
-#include <sys/types.h>
-#include <thread> // for threads
-#include <sys/socket.h> // for sockets
-#include <arpa/inet.h> 
+#include <arpa/inet.h>
 #include <netinet/in.h>
-#include <iostream> 
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <thread>
 #include <vector>
-#include <string.h> 
-#include <string> 
-#include <unordered_map> 
-#include <stdlib.h> 
-#include <unordered_set>
-#include <sstream>
 
 #include "common/message.h"
 #include "common/socket_io.h"
+#include "tracker/tracker_state.h"
 
 using namespace std;
 using p2p::recv_framed;
+using p2p::Result;
 using p2p::send_framed;
 using p2p::split_args;
+using p2p::TrackerState;
 
-// representing peer/client in the P2P network
-struct client 
+// The single shared instance of all tracker state. Every connection
+// thread below drives this same object; TrackerState is responsible for
+// its own locking.
+static TrackerState g_state;
+
+// Turns one parsed command into a reply. Argument-count validation lives
+// here; everything that touches shared state goes through g_state, which
+// takes the lock.
+static string dispatch(const vector<string> &comds)
 {
-    string hostip, hostport, peername, passcode;    // info for peer
-    unordered_map<string, string> filmaptopath;     // file map
-    bool connected = false;     // checking for connected
+    const string &cmd = comds[0];
+    const size_t n = comds.size();
 
-    client(string& username, string& code)
-        : peername(username), passcode(code), connected(false) {} // constructor
-
-    void login(string& ip, string& port) 
+    if (cmd == "create_user")
     {
-        hostip = ip;        // setting ip
-        hostport = port;    // setting port
-        connected = true;   // setting connected
+        if (n != 3) return "-----Invalid Arguments-----";
+        return g_state.create_user(comds[1], comds[2]).message;
     }
-
-    void logout() 
+    if (cmd == "login")
     {
-        connected = false;  // setting not connected
-        hostip.clear();     // clearing ip
-        hostport.clear();   // clearing port
+        if (n < 5) return "-----Invalid Arguments for login-----";
+        return g_state.login(comds[1], comds[2], comds[3], comds[4]).message;
     }
-};
-
-// representing a group in the P2P network
-class group 
-{
-public:
-    string gid;         // group id
-    string groupmaster; // group master
-    unordered_set<string> participants, applicants; // members and requests
-
-    group(string id, string name) 
+    if (cmd == "logout")
     {
-        gid = id; // setting id
-        groupmaster = name; // setting master
-        participants.insert(name); // adding master to group
+        if (n < 2) return "-----Invalid Arguments-----";
+        return g_state.logout(comds[1]).message;
     }
-
-    // checking applicant
-    bool isapplicant(string s) 
-    { 
-        return applicants.find(s) != applicants.end(); 
-    } 
-
-    // checking if member of a group 
-    bool partofgroup(string s) 
-    { 
-        return participants.find(s) != participants.end(); 
-    } 
-
-    void deluser(string s) 
+    if (cmd == "create_group")
     {
-        participants.erase(s);  // removing user
-        if (s == groupmaster)   // cehcking if user is master 
-        { 
-            if (!participants.empty()) 
-            {
-                groupmaster = *participants.begin(); // new master
-                cout << "Group " << gid << " new owner is: " << groupmaster << endl;
-            } 
-            else 
-            {
-                groupmaster = ""; // no master
-                cout << "Group " << gid << " has no members left" << endl;
-            }
+        if (n < 3) return "-----Invalid Arguments-----";
+        return g_state.create_group(comds[1], comds[2]).message;
+    }
+    if (cmd == "join_group")
+    {
+        if (n < 3) return "-----Invalid Arguments-----";
+        return g_state.join_group(comds[1], comds[2]).message;
+    }
+    if (cmd == "leave_group")
+    {
+        if (n < 3) return "-----Invalid Arguments-----";
+        return g_state.leave_group(comds[1], comds[2]).message;
+    }
+    if (cmd == "list_requests")
+    {
+        if (n < 3) return "-----Invalid Arguments-----";
+        return g_state.list_requests(comds[1], comds[2]).message;
+    }
+    if (cmd == "accept_request")
+    {
+        if (n < 4) return "-----Invalid Arguments-----";
+        return g_state.accept_request(comds[1], comds[2], comds[3]).message;
+    }
+    if (cmd == "list_groups")
+    {
+        return g_state.list_groups().message;
+    }
+    if (cmd == "upload_file")
+    {
+        // Needs gid, filename, user, size, hash and piece count before the
+        // variable-length piece hash list starts at index 7. The previous
+        // check only required 4 tokens but then read comds[4..6]
+        // unconditionally, so a short upload_file read past the end.
+        if (n < 7) return "-----Invalid Arguments for upload_file-----";
+        long long fsize = atoll(comds[4].c_str());
+        int num_pieces = stoi(comds[6]);
+        vector<string> piece_hashes;
+        for (size_t i = 7; i < n; ++i)
+        {
+            piece_hashes.push_back(comds[i]);
         }
+        return g_state
+            .upload_file(comds[1], comds[2], comds[3], fsize, comds[5],
+                         num_pieces, piece_hashes)
+            .message;
     }
-
-    void acceptreq(string s) 
+    if (cmd == "list_files")
     {
-        applicants.erase(s); // removing request
-        participants.insert(s); // adding to  group
+        if (n < 3) return "-----Invalid Arguments-----";
+        return g_state.list_files(comds[1], comds[2]).message;
     }
-
-};
-
-// metadata for shared file : size, hashes, seeders
-struct FileMeta 
-{
-    long long size = 0;     // size of file
-    string fullhash;        // hashing of full file
-    int num_pieces = 0;     // pieces
-    vector<string> piece_hashes;    // piece hashes
-    unordered_set<string> peers;    // who has file
-};
-
-// maps for tracking users, groups, files, and group-file
-unordered_map<string, client*> peers;   // peername to client
-unordered_map<string, group*> groups;   // group id to group
-unordered_map<string, unordered_set<string>> group_files; // group to files
-unordered_map<string, FileMeta> files;  // file to meta
-
-// checking existence of group and user
-bool isgrouppresent(string str) 
-{
-    return groups.find(str) != groups.end(); // checking group
+    if (cmd == "download_file")
+    {
+        if (n < 4) return "-----Invalid Arguments for download_file-----";
+        return g_state.download_file(comds[1], comds[2], comds[3]).message;
+    }
+    if (cmd == "file_downloaded")
+    {
+        if (n != 4) return "-----Invalid Arguments for file_downloaded-----";
+        return g_state.file_downloaded(comds[1], comds[2], comds[3]).message;
+    }
+    if (cmd == "stop_share")
+    {
+        if (n != 4) return "-----Invalid Arguments for stop_share-----";
+        return g_state.stop_share(comds[1], comds[2], comds[3]).message;
+    }
+    return "Unrecognized command";
 }
 
-bool isuserpresent(string str) 
+// Reads framed commands from one connected client until the connection
+// drops, replying to each.
+void managepeer(int peersocket)
 {
-    return peers.find(str) != peers.end(); // checking user
-}
+    string disconnecting_user; // user to clean up after on disconnect
 
-// for handling all commands from connected client
-void managepeer(int peersocket) 
-{
-    string disconnecting_user; // user to disconnect
-    // main loop which read and process commands from peer
-    while (1) 
+    while (true)
     {
-        // incoming command from socket, framed as [4-byte length][payload]
-        // so a command that spans multiple TCP segments (e.g. upload_file
-        // with hundreds of piece hashes) is never mistaken for complete
-        // after a single read()
         string buff;
         if (!recv_framed(peersocket, buff))
         {
             cout << "Connection closed or errored: " << peersocket << endl;
-
-            // on disconnect, transfer group ownership if required
-            if (!disconnecting_user.empty())
-            {
-                for (auto &gpair : groups)
-                {
-                    group *grp = gpair.second;
-                    if (grp->groupmaster == disconnecting_user)
-                    {
-                        grp->deluser(disconnecting_user); // removing master
-                    }
-                }
-            }
+            g_state.handle_disconnect(disconnecting_user);
+            close(peersocket);
             return;
         }
 
-        cout << "Incoming command from socket " << peersocket << ": " << buff << endl;
+        cout << "Incoming command from socket " << peersocket << ": " << buff
+             << endl;
 
-        // tokenize command string into args
-        vector<string> comds = split_args(buff); // commands
-
-        // handling commands checking that it should have at least one token
-        if (comds.empty()) 
+        vector<string> comds = split_args(buff);
+        if (comds.empty())
         {
-            string msg = "Invalid command";
-            send_framed(peersocket, msg);
+            send_framed(peersocket, "Invalid command");
             continue;
         }
 
-        // tracking user for disconnect  for group ownership transfer
-        if ((comds[0] == "login" || comds[0] == "logout") && comds.size() > 1) 
+        // remember who this connection belongs to, for disconnect cleanup
+        if ((comds[0] == "login" || comds[0] == "logout") && comds.size() > 1)
         {
-            disconnecting_user = comds[1]; // setting user
+            disconnecting_user = comds[1];
         }
 
-        // create_user <username> <passcode>
-        if (comds[0] == "create_user") 
-        {
-            if (comds.size() != 3) 
-            {
-                string msg = "-----Invalid Arguments-----"; 
-                send_framed(peersocket, msg);
-            } 
-            else if (isuserpresent(comds[1])) 
-            {
-                string msg = "-----Cannot create user: ID already in use.-----";
-                send_framed(peersocket, msg);
-            } 
-            else 
-            {
-                client* peer = new client(comds[1], comds[2]); // new user
-                peers[comds[1]] = peer; // add user
-                string msg = "***** ID number " + comds[1] + " registered successfully! ******";
-                send_framed(peersocket, msg);
-                cout << "****** ID " << comds[1] << " has been registered as a new user. ******" << endl;
-            }
-        }
-
-        // login <username> <passcode> <ip> <port>
-        else if (comds[0] == "login") 
-        {
-            if (comds.size() < 5) 
-            {
-                string msg = "-----Invalid Arguments for login-----";
-                send_framed(peersocket, msg);
-            }
-            else if (!isuserpresent(comds[1])) 
-            {
-                string msg = "------ User ID " + comds[1] + " is not registered ------";
-                send_framed(peersocket, msg);
-            } 
-            else if (peers[comds[1]]->passcode != comds[2]) 
-            {
-                string msg = "------ Authentication failed: incorrect passcode for ID " + comds[1] + " ------";
-                send_framed(peersocket, msg);
-            } 
-            else 
-            {
-                peers[comds[1]]->login(comds[3], comds[4]);
-                string msg = "Successful Login for User ID " + comds[1] + "! ******\n";
-                send_framed(peersocket, msg);
-            }
-        }
-
-        // logout <username>
-        else if (comds[0] == "logout") 
-        {
-            if (comds.size() < 2) 
-            {
-                string msg = "-----Invalid Arguments-----";
-                send_framed(peersocket, msg);
-            } 
-            else if (!isuserpresent(comds[1])) 
-            {
-                string msg = "------- No such User ID: " + comds[1] + " ------";
-                send_framed(peersocket, msg);
-            } 
-            else 
-            {
-                peers[comds[1]]->logout(); // logout
-                string msg = "***** User ID " + comds[1] + " logged out successfully ******";
-                send_framed(peersocket, msg);
-            }
-        }
-
-        // create_group <groupid> <owner_username>
-        else if (comds[0] == "create_group") 
-        {
-            if (comds.size() < 3) 
-            {
-                string msg = "-----Invalid Arguments-----";
-                send_framed(peersocket, msg);
-            } 
-            else if (!isuserpresent(comds[2])) 
-            {
-                string msg = "------- No such User ID: " + comds[2] + " ------";
-                send_framed(peersocket, msg); 
-            } 
-            else if (isgrouppresent(comds[1])) 
-            {
-                string msg = "------- This Group ID is already taken ------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else 
-            {
-                group * initgrp = new group(comds[1], comds[2]); // creating new group
-                groups[comds[1]] = initgrp; // adding group
-                string msg = "******* Group creation successful. Assigned ID: " + comds[1] + " *******";
-                send_framed(peersocket, msg);
-            }
-        }
-
-        // join_group <groupid> <username>
-        else if (comds[0] == "join_group") 
-        {
-            if (comds.size() < 3) 
-            {
-                string msg = "-----Invalid Arguments-----"; 
-                send_framed(peersocket, msg);
-            } 
-            else if (!isuserpresent(comds[2])) 
-            {
-                string msg = "------- No such User ID: " + comds[2] + " ------"; 
-                send_framed(peersocket, msg); 
-            }
-            else if (!isgrouppresent(comds[1])) 
-            {
-                string msg = "------- No such group ID: " + comds[1] + " ------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else if (groups[comds[1]]->partofgroup(comds[2])) 
-            {
-                string msg = "------- You have already joined this group: " + comds[1] + " -------";
-                send_framed(peersocket, msg); 
-            } 
-            else 
-            {
-                groups[comds[1]]->applicants.insert(comds[2]); // add request
-                string msg = "******* Request to join group " + comds[1] + " has been sent ******";
-                send_framed(peersocket, msg); 
-            }
-        }
-
-        // leave_group <groupid> <username>
-        else if (comds[0] == "leave_group") 
-        {
-            if (comds.size() < 3) 
-            {
-                string msg = "-----Invalid Arguments-----"; 
-                send_framed(peersocket, msg); 
-            } 
-            else if (!isuserpresent(comds[2])) 
-            {
-                string msg = "------- No such User ID: " + comds[2] + " ------"; 
-                send_framed(peersocket, msg);
-            } 
-            else if (!isgrouppresent(comds[1])) 
-            {
-                string msg = "------- No such group ID: " + comds[1] + " ------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else if (!groups[comds[1]]->partofgroup(comds[2])) 
-            {
-                string msg = "------ Access denied. You are not part of Group ID " + comds[1] + " -------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else 
-            {
-                groups[comds[1]]->deluser(comds[2]); // removing user
-                string msg = "****** Left group successfully. ID: " + comds[1] + " ******";
-                send_framed(peersocket, msg); 
-            }
-        }
-
-        // list_requests <groupid> <owner_username>
-        else if (comds[0] == "list_requests") 
-        {
-            if (comds.size() < 3) 
-            {
-                string msg = "-----Invalid Arguments-----"; 
-                send_framed(peersocket, msg); 
-            } 
-            else if (!isuserpresent(comds[2])) 
-            {
-                string msg = "------- No such User ID: " + comds[2] + " ------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else if (!isgrouppresent(comds[1])) 
-            {
-                string msg = "------- No such group ID: " + comds[1] + " ------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else if (groups[comds[1]]->groupmaster != comds[2]) 
-            {
-                string msg = "------ Access denied. You are not the group owner of ID " + comds[1] + " -------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else 
-            {
-                string msg = ""; // message
-                for (const auto &user : groups[comds[1]]->applicants) msg += user + "\n"; // add requests
-                if (msg == "") msg = "------- Group ID " + comds[1] + " has no pending join requests -------"; // no requests
-                send_framed(peersocket, msg);
-            }
-        }
-
-        // accept_request <groupid> <applicant_username> <owner_username>
-        else if (comds[0] == "accept_request") 
-        {
-            if (comds.size() < 4) 
-            {
-                string msg = "-----Invalid Arguments-----"; 
-                send_framed(peersocket, msg); 
-            } 
-            else if (!isuserpresent(comds[2])) 
-            {
-                string msg = "------- No such User ID: " + comds[2] + " ------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else if (!isgrouppresent(comds[1])) 
-            {
-                string msg = "------- No such group ID: " + comds[1] + " ------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else if (groups[comds[1]]->groupmaster != comds[3]) 
-            {
-                string msg = "------ Access denied. You are not the group owner of ID " + comds[1] + " -------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else if (!groups[comds[1]]->isapplicant(comds[2])) 
-            {
-                string msg = "------- This user (ID: " + comds[2] + ") has no pending requests -------"; 
-                send_framed(peersocket, msg); 
-            } 
-            else 
-            {
-                groups[comds[1]]->acceptreq(comds[2]); // accept
-                string msg = "******* Approval granted for User ID: " + comds[2] + " *******"; 
-                send_framed(peersocket, msg); 
-            }
-        }
-
-        // list_groups
-        else if (comds[0] == "list_groups") 
-        {
-            string msg = "############### Available groups on the network ###############";
-            for (auto it = groups.begin(); it != groups.end(); it++) 
-            {
-                msg += "\n" + it->first; // adding group
-            }
-            if (msg == "") msg = "-------- Currently, no groups are available. -------"; // no groups are there
-            send_framed(peersocket, msg);
-        }
-
-    // upload_file <gid> <filename> <filePath>
-        else if (comds[0] == "upload_file") 
-        {
-            if (comds.size() < 4) 
-            {
-                string msg = "-----Invalid Arguments for upload_file-----";
-                send_framed(peersocket, msg);
-            } 
-            else 
-            {
-                string gid = comds[1]; // group id
-                string fname = comds[2]; // file name
-                string uname = comds[3]; // user name
-                long long fsize = atoll(comds[4].c_str()); // file size
-                string fhash = comds[5]; // file hash
-                int num_pieces = stoi(comds[6]); // pieces
-
-                if (!isgrouppresent(gid)) 
-                {
-                    string msg = "------- No such group ID: " + gid + " ------"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else if (!isuserpresent(uname) || !groups[gid]->partofgroup(uname)) 
-                {
-                    string msg = "------ You are not part of Group ID " + gid + " -------"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else 
-                {
-                    // read piece hashes from comds[7...]
-                    FileMeta &fm = files[fname]; // file meta
-                    fm.size = fsize; // seting size
-                    fm.fullhash = fhash; // seting hash
-                    fm.num_pieces = num_pieces; // seting pieces
-                    fm.piece_hashes.clear(); // clearing hashes
-                    for (int i = 0; i < num_pieces; ++i) 
-                    {
-                        if ((int)comds.size() > 7 + i)
-                        {
-                            fm.piece_hashes.push_back(comds[7 + i]); // adding hash
-                        }
-                        else 
-                        {
-                            fm.piece_hashes.push_back(string()); // empty
-                        }
-                    }
-                    fm.peers.insert(uname); // adding peer
-                    group_files[gid].insert(fname); // adding file
-
-                    string msg = "******* File " + fname + " uploaded to group " + gid + " successfully *******"; 
-                    send_framed(peersocket, msg); 
-                    cout << "Tracker: Registered file " << fname << " size " << fsize << " pieces " << num_pieces << endl; 
-                }
-            }
-        }
-
-        // list_files <gid>
-        else if (comds[0] == "list_files") 
-        {
-            if (comds.size() < 3) 
-            {
-                string msg = "-----Invalid Arguments-----"; 
-                send_framed(peersocket, msg); 
-            } 
-            else 
-            {
-                string gid = comds[1]; // group id
-                string uname = comds[2]; // user name
-                if (!isgrouppresent(gid)) 
-                {
-                    string msg = "------- No such group ID: " + gid + " ------"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else if (!isuserpresent(uname) || !groups[gid]->partofgroup(uname)) 
-                {
-                    string msg = "------ Access denied. You are not part of Group ID " + gid + " -------"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else 
-                {
-                    string msg;
-                    if (group_files.find(gid) == group_files.end() || group_files[gid].empty()) 
-                    {
-                        msg = "------- No files uploaded in group " + gid + " -------"; // no files
-                    } 
-                    else 
-                    {
-                        msg = "######## Files in Group " + gid + " ########\n";
-                        for (const auto &fname : group_files[gid]) 
-                        {
-                            FileMeta &fm = files[fname]; // file meta
-                            msg += fname + " SIZE:" + to_string(fm.size) + " PIECES:" + to_string(fm.num_pieces) + "\n"; // adding file
-                        }
-                    }
-                    send_framed(peersocket, msg);
-                }
-            }
-        }
-
-        // download_file <gid> <filename> <dest path>
-        // file metadata and list of seeders
-        else if (comds[0] == "download_file") 
-        {
-            if (comds.size() < 4) 
-            {
-                string msg = "-----Invalid Arguments for download_file-----";
-                send_framed(peersocket, msg);
-            } 
-            else 
-            {
-                string gid = comds[1]; // group id
-                string fname = comds[2]; // file name
-                string uname = comds[3]; // user name
-
-                if (!isgrouppresent(gid)) 
-                {
-                    string msg = "------- No such group ID: " + gid + " ------"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else if (!isuserpresent(uname) || !groups[gid]->partofgroup(uname)) 
-                {
-                    string msg = "------ Access denied. You are not part of Group ID " + gid + " -------"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else if (group_files[gid].find(fname) == group_files[gid].end()) 
-                {
-                    string msg = "------- No such file in group " + gid + " -------"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else 
-                {
-                    FileMeta &fm = files[fname]; // file meta
-                    string msg = "FILE " + fname + " SIZE " + to_string(fm.size) + " HASH " + fm.fullhash + " PIECES " + to_string(fm.num_pieces) + " PIECE_HASHES";
-                    for (auto &h : fm.piece_hashes)
-                    {
-                        msg += " " + h; // adding hashes
-                    }
-                    msg += "\nPEERS\n";
-                    
-                    for (const string &peer : fm.peers) 
-                    {
-                        if (isuserpresent(peer) && peers[peer]->connected) 
-                        {
-                            msg += peer + " " + peers[peer]->hostip + " " + peers[peer]->hostport + "\n"; // add peer
-                        }
-                    }
-                    msg += "\n";
-                    send_framed(peersocket, msg);
-                }
-            }
-        }
-
-        // file_downloaded <gid> <filename> <peername>
-        // will notify tracker that peer completed download and can now serve file
-        else if (comds[0] == "file_downloaded") 
-        {
-            if (comds.size() != 4) 
-            {
-                string msg = "-----Invalid Arguments for file_downloaded-----"; 
-                send_framed(peersocket, msg); 
-            } 
-            else 
-            {
-                string gid = comds[1]; // group id
-                string filename = comds[2]; // file name
-                string peername = comds[3]; // peer name
-
-                if (groups.find(gid) != groups.end() && groups[gid]->participants.find(peername) != groups[gid]->participants.end()) 
-                {
-                    if (group_files.find(gid) != group_files.end() && group_files[gid].find(filename) != group_files[gid].end()) 
-                    {
-                        if (peers.find(peername) != peers.end()) 
-                        {
-                            peers[peername]->filmaptopath[filename] = filename; // adding file
-                            if (files.find(filename) != files.end()) 
-                            {
-                                files[filename].peers.insert(peername); // adding peer
-                            }
-                            string msg = "SUCCESS: Peer " + peername + " registered as seeder for " + filename;
-                            send_framed(peersocket, msg); 
-                        } 
-                        else 
-                        {
-                            string msg = "ERROR: Peer not found"; 
-                            send_framed(peersocket, msg); 
-                        }
-                    } 
-                    else 
-                    {
-                        string msg = "ERROR: File not found in group"; 
-                        send_framed(peersocket, msg); 
-                    }
-                } 
-                else 
-                {
-                    string msg = "ERROR: Group not found or peer not member"; 
-                    send_framed(peersocket, msg); 
-                }
-            }
-        }
-
-        // stop_share <gid> <filename> <peername>
-        // removing peer from file's seeder list for group
-        else if (comds[0] == "stop_share") 
-        {
-            if (comds.size() != 4) 
-            {
-                string msg = "-----Invalid Arguments for stop_share-----"; 
-                send_framed(peersocket, msg); 
-            } else {
-                string gid = comds[1]; // group id
-                string filename = comds[2]; // file name
-                string peername = comds[3]; // peer name
-                if (!isgrouppresent(gid)) 
-                {
-                    string msg = "ERROR: Group not found"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else if (!isuserpresent(peername) || groups[gid]->participants.find(peername) == groups[gid]->participants.end()) 
-                {
-                    string msg = "ERROR: Peer not found or not member of group"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else if (group_files[gid].find(filename) == group_files[gid].end()) 
-                {
-                    string msg = "ERROR: File not found in group"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else if (files.find(filename) == files.end()) 
-                {
-                    string msg = "ERROR: File metadata not found"; 
-                    send_framed(peersocket, msg); 
-                } 
-                else 
-                {
-                    files[filename].peers.erase(peername); // removing peer
-                    if (peers.find(peername) != peers.end()) 
-                    {
-                        peers[peername]->filmaptopath.erase(filename); // removing file
-                    }
-                    string msg = "SUCCESS: Peer " + peername + " stopped sharing " + filename + " in group " + gid; 
-                    send_framed(peersocket, msg); 
-                }
-            }
-        }
-
-        // unrecogniszed command
-        else 
-        {
-            string msg = "Unrecognized command"; 
-            send_framed(peersocket, msg); 
-        }
+        send_framed(peersocket, dispatch(comds));
     }
 }
 
-int main(int argc, char *argv[]) 
+int main(int argc, char *argv[])
 {
-    if (argc != 3) 
+    if (argc != 3)
     {
         cout << "-----Invalid Arguments-----" << endl;
-        return 0;
+        return 1;
     }
 
     // reading tracker IP and port from config file
     FILE *filconfig = fopen(argv[1], "r"); // opening file
-    if (!filconfig) 
-    { 
-        cout << "Failed to open tracker info file" << endl; 
-        return 0; 
-    } 
+    if (!filconfig)
+    {
+        cout << "Failed to open tracker info file" << endl;
+        return 1;
+    }
 
     char ipbuf[128], portbuf[32]; // buffers
-    if (fscanf(filconfig, "%127s %31s", ipbuf, portbuf) != 2) 
-    { 
-        cout << "Failed to read tracker info" << endl; 
-        fclose(filconfig); 
-        return 0; 
-    } 
+    if (fscanf(filconfig, "%127s %31s", ipbuf, portbuf) != 2)
+    {
+        cout << "Failed to read tracker info" << endl;
+        fclose(filconfig);
+        return 1;
+    }
 
     fclose(filconfig); // closing file
     string serverip = ipbuf; // setting ip
@@ -742,51 +230,48 @@ int main(int argc, char *argv[])
     }
 
     // server startup info and available commands
-    cout << "\n=========================================\n"; 
-    cout << "          TRACKER SERVER STARTED         \n"; 
-    cout << "=========================================\n"; 
-    cout << "Listening on IP: " << serverip << "  Port: " << serverport << endl; 
-    cout << "Tracker is now running...\n"; 
-    cout << "-----------------------------------------\n"; 
-    cout << "Available Tracker Commands (from console):\n"; 
-    cout << "   quit   -> Stop the tracker server\n"; 
-    cout << "-----------------------------------------\n\n"; 
+    cout << "\n=========================================\n";
+    cout << "          TRACKER SERVER STARTED         \n";
+    cout << "=========================================\n";
+    cout << "Listening on IP: " << serverip << "  Port: " << serverport << endl;
+    cout << "Tracker is now running...\n";
+    cout << "-----------------------------------------\n";
+    cout << "Available Tracker Commands (from console):\n";
+    cout << "   quit   -> Stop the tracker server\n";
+    cout << "-----------------------------------------\n\n";
 
     int incomsock; // incoming socket
-    vector<thread> peerss; // threads
     int length = sizeof(serveradd);
 
-    // thread to handle console input 
-    thread exit_thread([]() 
+    // thread to handle console input
+    thread exit_thread([]()
     {
         string inp;
-        while (true) 
+        while (true)
         {
             getline(cin, inp);
             if (inp == "quit")
             {
                 exit(0);
-            } 
+            }
         }
     });
     exit_thread.detach(); // detach
 
     // handle incoming client connections
-    while (1) 
+    while (1)
     {
-        if ((incomsock = accept(serversock, (struct sockaddr *)&serveradd, (socklen_t *)&length)) < 0) 
+        if ((incomsock = accept(serversock, (struct sockaddr *)&serveradd, (socklen_t *)&length)) < 0)
         {
             cout << "------- Unable to accept incoming connection -------" << endl;
             continue;
         }
         cout << "******* Client accepted at socket: " << incomsock << " ******" << endl;
-        peerss.push_back(thread(managepeer, incomsock)); // adding thread
+        // Detached: the accept loop never returns, so nothing would ever
+        // join these. The previous code accumulated thread objects in a
+        // vector it could not reach the join for, growing without bound.
+        thread(managepeer, incomsock).detach();
     }
 
-    // join all peer threads before exiting
-    for (int i = 0; i < peerss.size(); i++)
-    {
-        peerss[i].join(); // join
-    }
     return 0;
 }
