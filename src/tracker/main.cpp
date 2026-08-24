@@ -704,18 +704,21 @@ int main(int argc, char *argv[])
 
     // creating server socket
     serversock = socket(AF_INET, SOCK_STREAM, 0); // socket
-    if (serversock == 0) 
+    if (serversock < 0)
     {
-        cout << "------- Error: Could not create socket -------" << endl;
-        return 0;
+        perror("------- Error: Could not create socket -------");
+        return 1;
     }
 
-    // setting socket options for address reuse
+    // SO_REUSEADDR only: lets the tracker rebind a port still in TIME_WAIT
+    // after a restart. Deliberately NOT SO_REUSEPORT, which would let a
+    // second tracker bind the same port and have the kernel split incoming
+    // clients between two processes with separate, diverging state.
     int choice = 1; // option
-    if (setsockopt(serversock, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &choice, sizeof(choice)) != 0) 
+    if (setsockopt(serversock, SOL_SOCKET, SO_REUSEADDR, &choice, sizeof(choice)) != 0)
     {
-        cout << "------- Unable to configure socket options ------" << endl;
-        return 0;
+        perror("------- Unable to configure socket options ------");
+        return 1;
     }
 
     // binding server to IP and port
@@ -724,17 +727,18 @@ int main(int argc, char *argv[])
     int port = stoi(serverport); // port
     serveradd.sin_port = htons(port); // setting port
 
-    if (bind(serversock, (struct sockaddr *)&serveradd, sizeof(serveradd)) < 0) 
+    if (bind(serversock, (struct sockaddr *)&serveradd, sizeof(serveradd)) < 0)
     {
-        cout << "------ Unable to bind socket ------" << endl;
-        return 0;
+        perror("------ Unable to bind socket ------");
+        cout << "Is another tracker already running on port " << serverport << "?" << endl;
+        return 1;
     }
 
     // listening for incoming connections
-    if (listen(serversock, 20) < 0) 
+    if (listen(serversock, 20) < 0)
     {
-        cout << "------- Unable to start listening on socket ---------" << endl;
-        return 0;
+        perror("------- Unable to start listening on socket ---------");
+        return 1;
     }
 
     // server startup info and available commands

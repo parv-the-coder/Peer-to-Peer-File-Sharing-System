@@ -199,24 +199,28 @@ void handling_peer_conn(string ip, string port)
     int sock; // socket
     int choice = 1; // option
     struct sockaddr_in addr; // address
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) == 0) 
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
-        cout << "------- Failed to create socket -------" << endl; 
+        perror("------- Failed to create socket -------");
         return;
     }
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &choice, sizeof(choice))) 
+    // SO_REUSEADDR only, not SO_REUSEPORT: two clients sharing one peer
+    // port would have the kernel split GET_PIECE requests between them,
+    // and only one of them actually has the file.
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &choice, sizeof(choice)))
     {
-        cout << "------- Failed to set socket options -------" << endl; 
+        perror("------- Failed to set socket options -------");
         return;
     }
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY; // any address
     addr.sin_port = htons(stoi(port)); // port
 
-    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) 
-    { 
-        perror("Bind Error"); 
-        exit(EXIT_FAILURE); 
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+        perror("Bind Error");
+        cout << "Is another client already using peer port " << port << "?" << endl;
+        exit(EXIT_FAILURE);
     }
 
     if (listen(sock, 20) < 0) 
