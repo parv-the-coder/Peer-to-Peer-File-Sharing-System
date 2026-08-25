@@ -65,9 +65,13 @@ Result TrackerState::create_user(const std::string &username,
   if (user_exists_locked(username)) {
     return {false, "-----Cannot create user: ID already in use.-----"};
   }
+  PasswordHash ph = hash_password(passcode);
+  if (ph.salt.empty() || ph.hash.empty()) {
+    return {false, "-----Cannot create user: server entropy unavailable-----"};
+  }
   Peer peer;
   peer.peername = username;
-  peer.passcode = passcode;
+  peer.password = std::move(ph);
   peers_[username] = std::move(peer);
   std::cout << "****** ID " << username
             << " has been registered as a new user. ******" << std::endl;
@@ -83,7 +87,7 @@ Result TrackerState::login(const std::string &username,
   if (it == peers_.end()) {
     return {false, "------ User ID " + username + " is not registered ------"};
   }
-  if (it->second.passcode != passcode) {
+  if (!verify_password(passcode, it->second.password)) {
     return {false, "------ Authentication failed: incorrect passcode for ID " +
                        username + " ------"};
   }

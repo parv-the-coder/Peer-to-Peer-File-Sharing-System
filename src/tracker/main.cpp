@@ -14,6 +14,7 @@
 #include "common/hash.h"
 #include "common/message.h"
 #include "common/socket_io.h"
+#include "tracker/session_manager.h"
 #include "tracker/tracker_state.h"
 
 using namespace std;
@@ -21,20 +22,51 @@ using p2p::recv_framed;
 using p2p::Result;
 using p2p::send_framed;
 using p2p::split_args;
+using p2p::SessionManager;
 using p2p::TrackerState;
 
 // The single shared instance of all tracker state. Every connection
 // thread below drives this same object; TrackerState is responsible for
 // its own locking.
 static TrackerState g_state;
+// Session tokens, with their own independent lock.
+static SessionManager g_sessions;
 
-// Turns one parsed command into a reply. Argument-count validation lives
-// here; everything that touches shared state goes through g_state, which
-// takes the lock.
-static string dispatch(const vector<string> &comds)
+// Reads the peer's address off the accepted socket. This is the
+// authoritative source for a peer's IP: the previous protocol let the
+// client send whatever IP it liked at login, so a client could advertise
+// someone else's address and have other peers directed there.
+static string socket_peer_ip(int fd)
+{
+    struct sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    if (getpeername(fd, (struct sockaddr *)&addr, &len) != 0)
+    {
+        return "";
+    }
+    char buf[INET_ADDRSTRLEN] = {0};
+    if (!inet_ntop(AF_INET, &addr.sin_addr, buf, sizeof(buf)))
+    {
+        return "";
+    }
+    return string(buf);
+}
+
+// Turns one parsed command into a reply.
+//
+// Identity comes from the session token, never from a username argument.
+// Previously every privileged command took a bare <username> string and
+// the tracker simply believed it, so any connected client could act as
+// any user by naming them.
+static string dispatch(const vector<string> &comds, const string &peer_ip)
 {
     const string &cmd = comds[0];
     const size_t n = comds.size();
+
+    static const string kAuthErr =
+        "ERROR: AUTH_REQUIRED - session invalid or expired, please log in again";
+
+    // --- unauthenticated commands ---
 
     if (cmd == "create_user")
     {
@@ -43,38 +75,68 @@ static string dispatch(const vector<string> &comds)
     }
     if (cmd == "login")
     {
-        if (n < 5) return "-----Invalid Arguments for login-----";
-        return g_state.login(comds[1], comds[2], comds[3], comds[4]).message;
+        // login <username> <password> <listen_port>
+        // The peer's IP is taken from the socket; only the port it listens
+        // on is client-supplied, since that cannot be derived from an
+        // inbound connection.
+        if (n != 4) return "-----Invalid Arguments for login-----";
+        int listen_port = 0;
+        if (!p2p::parse_int(comds[3], listen_port) || listen_port <= 0 ||
+            listen_port > 65535)
+        {
+            return "-----Invalid Arguments for login-----";
+        }
+        Result r = g_state.login(comds[1], comds[2], peer_ip, comds[3]);
+        if (!r.ok) return r.message;
+        string token = g_sessions.create(comds[1], peer_ip, comds[3]);
+        if (token.empty())
+        {
+            return "------ Login failed: server entropy unavailable ------";
+        }
+        // "OK <token>" -- the client stores the token and attaches it to
+        // every subsequent command.
+        return "OK " + token;
     }
+
+    // --- everything below requires a valid session ---
+
+    if (n < 2) return kAuthErr;
+    const string &token = comds[1];
+
     if (cmd == "logout")
     {
-        if (n < 2) return "-----Invalid Arguments-----";
-        return g_state.logout(comds[1]).message;
+        string user = g_sessions.destroy(token);
+        if (user.empty()) return kAuthErr;
+        return g_state.logout(user).message;
     }
+
+    string user;
+    if (!g_sessions.username_for(token, user)) return kAuthErr;
+
     if (cmd == "create_group")
     {
-        if (n < 3) return "-----Invalid Arguments-----";
-        return g_state.create_group(comds[1], comds[2]).message;
+        if (n != 3) return "-----Invalid Arguments-----";
+        return g_state.create_group(comds[2], user).message;
     }
     if (cmd == "join_group")
     {
-        if (n < 3) return "-----Invalid Arguments-----";
-        return g_state.join_group(comds[1], comds[2]).message;
+        if (n != 3) return "-----Invalid Arguments-----";
+        return g_state.join_group(comds[2], user).message;
     }
     if (cmd == "leave_group")
     {
-        if (n < 3) return "-----Invalid Arguments-----";
-        return g_state.leave_group(comds[1], comds[2]).message;
+        if (n != 3) return "-----Invalid Arguments-----";
+        return g_state.leave_group(comds[2], user).message;
     }
     if (cmd == "list_requests")
     {
-        if (n < 3) return "-----Invalid Arguments-----";
-        return g_state.list_requests(comds[1], comds[2]).message;
+        if (n != 3) return "-----Invalid Arguments-----";
+        return g_state.list_requests(comds[2], user).message;
     }
     if (cmd == "accept_request")
     {
-        if (n < 4) return "-----Invalid Arguments-----";
-        return g_state.accept_request(comds[1], comds[2], comds[3]).message;
+        if (n != 4) return "-----Invalid Arguments-----";
+        return g_state.accept_request(comds[2], comds[3], user).message;
     }
     if (cmd == "list_groups")
     {
@@ -82,10 +144,7 @@ static string dispatch(const vector<string> &comds)
     }
     if (cmd == "upload_file")
     {
-        // Needs gid, filename, user, size, hash and piece count before the
-        // variable-length piece hash list starts at index 7. The previous
-        // check only required 4 tokens but then read comds[4..6]
-        // unconditionally, so a short upload_file read past the end.
+        // upload_file <token> <gid> <fname> <size> <hash> <num_pieces> <hashes...>
         if (n < 7) return "-----Invalid Arguments for upload_file-----";
         long long fsize = 0;
         int num_pieces = 0;
@@ -113,29 +172,30 @@ static string dispatch(const vector<string> &comds)
             piece_hashes.push_back(comds[i]);
         }
         return g_state
-            .upload_file(comds[1], comds[2], comds[3], fsize, comds[5],
-                         num_pieces, piece_hashes)
+            .upload_file(comds[2], comds[3], user, fsize, comds[5], num_pieces,
+                         piece_hashes)
             .message;
     }
     if (cmd == "list_files")
     {
-        if (n < 3) return "-----Invalid Arguments-----";
-        return g_state.list_files(comds[1], comds[2]).message;
+        if (n != 3) return "-----Invalid Arguments-----";
+        return g_state.list_files(comds[2], user).message;
     }
     if (cmd == "download_file")
     {
-        if (n < 4) return "-----Invalid Arguments for download_file-----";
-        return g_state.download_file(comds[1], comds[2], comds[3]).message;
+        // download_file <token> <gid> <fname>
+        if (n != 4) return "-----Invalid Arguments for download_file-----";
+        return g_state.download_file(comds[2], comds[3], user).message;
     }
     if (cmd == "file_downloaded")
     {
         if (n != 4) return "-----Invalid Arguments for file_downloaded-----";
-        return g_state.file_downloaded(comds[1], comds[2], comds[3]).message;
+        return g_state.file_downloaded(comds[2], comds[3], user).message;
     }
     if (cmd == "stop_share")
     {
         if (n != 4) return "-----Invalid Arguments for stop_share-----";
-        return g_state.stop_share(comds[1], comds[2], comds[3]).message;
+        return g_state.stop_share(comds[2], comds[3], user).message;
     }
     return "Unrecognized command";
 }
@@ -144,7 +204,16 @@ static string dispatch(const vector<string> &comds)
 // drops, replying to each.
 void managepeer(int peersocket)
 {
-    string disconnecting_user; // user to clean up after on disconnect
+    const string peer_ip = socket_peer_ip(peersocket);
+    if (peer_ip.empty())
+    {
+        cout << "Could not determine peer address, dropping socket "
+             << peersocket << endl;
+        close(peersocket);
+        return;
+    }
+
+    string session_user; // who this connection authenticated as
 
     while (true)
     {
@@ -152,13 +221,10 @@ void managepeer(int peersocket)
         if (!recv_framed(peersocket, buff))
         {
             cout << "Connection closed or errored: " << peersocket << endl;
-            g_state.handle_disconnect(disconnecting_user);
+            g_state.handle_disconnect(session_user);
             close(peersocket);
             return;
         }
-
-        cout << "Incoming command from socket " << peersocket << ": " << buff
-             << endl;
 
         vector<string> comds = split_args(buff);
         if (comds.empty())
@@ -167,13 +233,24 @@ void managepeer(int peersocket)
             continue;
         }
 
-        // remember who this connection belongs to, for disconnect cleanup
-        if ((comds[0] == "login" || comds[0] == "logout") && comds.size() > 1)
+        // Log the verb only. The full line carries passwords on login and
+        // session tokens on everything else, and this goes to the console.
+        cout << "Command from socket " << peersocket << ": " << comds[0] << endl;
+
+        string reply = dispatch(comds, peer_ip);
+
+        // Track the authenticated user so a dropped connection can be
+        // cleaned up. Set only after the tracker itself accepted the login.
+        if (comds[0] == "login" && reply.rfind("OK ", 0) == 0)
         {
-            disconnecting_user = comds[1];
+            session_user = comds[1];
+        }
+        else if (comds[0] == "logout")
+        {
+            session_user.clear();
         }
 
-        send_framed(peersocket, dispatch(comds));
+        send_framed(peersocket, reply);
     }
 }
 

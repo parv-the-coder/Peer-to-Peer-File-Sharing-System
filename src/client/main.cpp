@@ -34,6 +34,7 @@ static const size_t PIECE_SIZE = p2p::kPieceSize; // 512KB piece size
 
 // globals
 string peername; // name of peer
+string session_token; // issued by the tracker at login; proves identity
 bool connected; // is connected
 int serversock; // server socket
 bool noaccept = false; // flag for accept
@@ -81,17 +82,17 @@ void displaycomds()
     cout << "============================================================\n\n";
 }
 
-// set peername and connected
-void login_local(string str) 
-{ 
-    peername = str; connected = true; 
-} 
+// set peername, token and connected
+void login_local(const string &str, const string &token)
+{
+    peername = str; session_token = token; connected = true;
+}
 
-// reset peername and connected
-void logout_local() 
-{ 
-    peername = ""; connected = false; 
-} 
+// reset peername, token and connected
+void logout_local()
+{
+    peername = ""; session_token = ""; connected = false;
+}
 
 void logincheck(function<void()> action) 
 {
@@ -402,7 +403,7 @@ int main(int argc, char *argv[])
                     cout << "File " << fname << " is not being shared by you." << endl;
                 }
                 // telling tracker to remove this peer as seeder
-                string msg = "stop_share " + gid + " " + fname + " " + peername; 
+                string msg = "stop_share " + session_token + " " + gid + " " + fname; 
                 string resp = sendcomd(serversock, msg); 
                 cout << resp << endl;
             });
@@ -431,13 +432,15 @@ int main(int argc, char *argv[])
                 cout << "-------- User session already active --------" << endl; 
                 return; 
             }
-            string msg = "login " + cmds[1] + " " + cmds[2] + " " + hostip + " " + hostport; 
-            string r = sendcomd(serversock, msg); 
-            if (!r.empty() && r[0] == 'S') 
-            { 
-                logout_local(); 
-                login_local(cmds[1]); 
-                cout << "********* You are now logged in *********" << endl; 
+            // Only the listening port is sent: the tracker takes our IP
+            // from the socket rather than trusting what we claim.
+            string msg = "login " + cmds[1] + " " + cmds[2] + " " + hostport;
+            string r = sendcomd(serversock, msg);
+            if (r.rfind("OK ", 0) == 0)
+            {
+                logout_local();
+                login_local(cmds[1], r.substr(3));
+                cout << "********* You are now logged in *********" << endl;
             }
             else cout << r << endl;
         };
@@ -446,7 +449,7 @@ int main(int argc, char *argv[])
         {
             logincheck([&]() 
             {
-                string r = sendcomd(serversock, "logout " + peername);
+                string r = sendcomd(serversock, "logout " + session_token);
                 cout << r << endl; 
                 logout_local(); 
             });
@@ -461,7 +464,7 @@ int main(int argc, char *argv[])
                     cout << "Usage: create_group <groupid>\n"; 
                     return; 
                 }
-                cout << sendcomd(serversock, "create_group " + cmds[1] + " " + peername) << endl; 
+                cout << sendcomd(serversock, "create_group " + session_token + " " + cmds[1]) << endl; 
             });
         };
 
@@ -474,7 +477,7 @@ int main(int argc, char *argv[])
                     cout << "Usage: join_group <groupid>\n"; 
                     return; 
                 }
-                cout << sendcomd(serversock, "join_group " + cmds[1] + " " + peername) << endl; 
+                cout << sendcomd(serversock, "join_group " + session_token + " " + cmds[1]) << endl; 
             });
         };
 
@@ -487,7 +490,7 @@ int main(int argc, char *argv[])
                     cout << "Usage: leave_group <groupid>\n"; 
                     return; 
                 }
-                cout << sendcomd(serversock, "leave_group " + cmds[1] + " " + peername) << endl; 
+                cout << sendcomd(serversock, "leave_group " + session_token + " " + cmds[1]) << endl; 
             });
         };
 
@@ -500,7 +503,7 @@ int main(int argc, char *argv[])
                     cout << "Usage: list_requests <groupid>\n"; 
                     return; 
                 }
-                cout << sendcomd(serversock, "list_requests " + cmds[1] + " " + peername) << endl; 
+                cout << sendcomd(serversock, "list_requests " + session_token + " " + cmds[1]) << endl; 
             });
         };
 
@@ -513,7 +516,7 @@ int main(int argc, char *argv[])
                     cout << "Usage: accept_request <groupid> <user>\n"; 
                     return; 
                 } 
-                cout << sendcomd(serversock, "accept_request " + cmds[1] + " " + cmds[2] + " " + peername) << endl; 
+                cout << sendcomd(serversock, "accept_request " + session_token + " " + cmds[1] + " " + cmds[2]) << endl; 
             });
         };
 
@@ -521,7 +524,7 @@ int main(int argc, char *argv[])
         {
             logincheck([&]() 
             { 
-                cout << sendcomd(serversock, "list_groups") << endl; 
+                cout << sendcomd(serversock, "list_groups " + session_token) << endl; 
             }); 
         };
 
@@ -534,7 +537,7 @@ int main(int argc, char *argv[])
                     cout << "Usage: list_files <groupid>\n"; 
                     return; 
                 }
-                cout << sendcomd(serversock, "list_files " + cmds[1] + " " + peername) << endl; 
+                cout << sendcomd(serversock, "list_files " + session_token + " " + cmds[1]) << endl; 
             });
         };
 
@@ -577,7 +580,7 @@ int main(int argc, char *argv[])
                 // store file locally so peer server can serve pieces
                 uploaded_files[fname] = fpath;
 
-                string cmd = "upload_file " + gid + " " + fname + " " + peername + " " + to_string(fsize) + " " + fullhash + " " + to_string(num_pieces);
+                string cmd = "upload_file " + session_token + " " + gid + " " + fname + " " + to_string(fsize) + " " + fullhash + " " + to_string(num_pieces);
                 for (auto &h : piece_hashes) cmd += " " + h; // add hashes
                 string r = sendcomd(serversock, cmd);
                 cout << r << endl;
@@ -608,7 +611,7 @@ int main(int argc, char *argv[])
                 }
 
                 // query tracker for file metadata and peers
-                string tracker_cmd = "download_file " + gid + " " + fname + " " + peername; 
+                string tracker_cmd = "download_file " + session_token + " " + gid + " " + fname; 
                 
                 string r = sendcomd(serversock, tracker_cmd); 
                 if (r.rfind("FILE ", 0) != 0) 
@@ -993,7 +996,7 @@ int main(int argc, char *argv[])
                     uploaded_files[fname] = fullout;
                     
                     // tell tracker that this peer now has the file so other peers can download
-                    string notify_cmd = "file_downloaded " + gid + " " + fname + " " + peername; 
+                    string notify_cmd = "file_downloaded " + session_token + " " + gid + " " + fname; 
                     string tracker_response = sendcomd(serversock, notify_cmd); 
                     
                     {

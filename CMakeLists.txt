@@ -16,6 +16,7 @@ add_library(p2p_common STATIC
   src/common/socket_io.cpp
   src/common/message.cpp
   src/common/hash.cpp
+  src/common/auth.cpp
 )
 target_include_directories(p2p_common PUBLIC src)
 target_link_libraries(p2p_common PUBLIC Threads::Threads OpenSSL::Crypto)
@@ -23,6 +24,7 @@ target_link_libraries(p2p_common PUBLIC Threads::Threads OpenSSL::Crypto)
 add_executable(tracker
   src/tracker/main.cpp
   src/tracker/tracker_state.cpp
+  src/tracker/session_manager.cpp
 )
 target_link_libraries(tracker PRIVATE p2p_common)
 

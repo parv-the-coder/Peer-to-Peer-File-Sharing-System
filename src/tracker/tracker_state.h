@@ -6,6 +6,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "common/auth.h"
+
 namespace p2p {
 
 // Outcome of a tracker command. `message` is the reply to send back to
@@ -20,7 +22,8 @@ struct Peer {
   std::string hostip;
   std::string hostport;
   std::string peername;
-  std::string passcode;
+  // Salt + SHA-256 digest. The plaintext password is never stored.
+  PasswordHash password;
   bool connected = false;
 
   void login(const std::string &ip, const std::string &port);
@@ -70,6 +73,8 @@ class TrackerState {
 public:
   // Account and session lifecycle.
   Result create_user(const std::string &username, const std::string &passcode);
+  // Verifies credentials and marks the peer connected. On success
+  // `out_ok` is set so the caller knows to mint a session token.
   Result login(const std::string &username, const std::string &passcode,
                const std::string &ip, const std::string &port);
   Result logout(const std::string &username);
