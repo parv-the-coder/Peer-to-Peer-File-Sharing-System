@@ -361,14 +361,21 @@ void TrackerState::handle_disconnect(const std::string &username) {
     return;
   }
   std::unique_lock lock(mtx_);
-  // Only hands off group ownership, matching the behaviour this replaces.
-  // The peer is deliberately not marked disconnected here yet, nor removed
-  // from the seeder lists -- that gap is a separate fix.
-  for (auto &entry : groups_) {
-    if (entry.second.groupmaster == username) {
-      entry.second.deluser(username);
-    }
+  auto pit = peers_.find(username);
+  if (pit != peers_.end()) {
+    pit->second.logout();
   }
+  // Group ownership is deliberately NOT handed off here. A dropped
+  // connection is transient -- the owner restarting their client should
+  // not permanently lose the group, which is what the previous behaviour
+  // did. Ownership moves only on an explicit leave_group.
+  //
+  // The peer also stays in each file's seeder set: it still holds those
+  // files, it is merely offline. download_file filters seeders by their
+  // connected flag, so clearing that flag is what actually stops the
+  // tracker handing out a dead address -- which it previously did,
+  // making downloaders burn their full retry budget against a peer that
+  // was gone.
 }
 
 } // namespace p2p

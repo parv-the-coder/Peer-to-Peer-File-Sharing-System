@@ -213,7 +213,8 @@ void managepeer(int peersocket)
         return;
     }
 
-    string session_user; // who this connection authenticated as
+    string session_user;  // who this connection authenticated as
+    string session_token; // their token, so it can be revoked on drop
 
     while (true)
     {
@@ -221,6 +222,12 @@ void managepeer(int peersocket)
         if (!recv_framed(peersocket, buff))
         {
             cout << "Connection closed or errored: " << peersocket << endl;
+            // Revoke the session too: without this a token stayed valid
+            // for its full 24h TTL after the client vanished.
+            if (!session_token.empty())
+            {
+                g_sessions.destroy(session_token);
+            }
             g_state.handle_disconnect(session_user);
             close(peersocket);
             return;
@@ -244,10 +251,12 @@ void managepeer(int peersocket)
         if (comds[0] == "login" && reply.rfind("OK ", 0) == 0)
         {
             session_user = comds[1];
+            session_token = reply.substr(3);
         }
         else if (comds[0] == "logout")
         {
             session_user.clear();
+            session_token.clear();
         }
 
         send_framed(peersocket, reply);
