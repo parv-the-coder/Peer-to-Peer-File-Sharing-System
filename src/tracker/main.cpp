@@ -4,6 +4,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -31,6 +34,15 @@ using p2p::TrackerState;
 static TrackerState g_state;
 // Session tokens, with their own independent lock.
 static SessionManager g_sessions;
+
+// Where tracker state is snapshotted, and how often.
+static std::string g_snapshot_path = "tracker_state.db";
+static constexpr std::chrono::seconds kSnapshotInterval{30};
+static std::atomic<bool> g_running{true};
+
+// Written from a signal handler, so it must be async-signal-safe: set a
+// flag and let the main loop do the actual work.
+static void on_signal(int) { g_running = false; }
 
 // Reads the peer's address off the accepted socket. This is the
 // authoritative source for a peer's IP: the previous protocol let the
@@ -358,6 +370,34 @@ int main(int argc, char *argv[])
     int incomsock; // incoming socket
     int length = sizeof(serveradd);
 
+    // Load any previous state before accepting connections.
+    if (g_state.load_snapshot(g_snapshot_path))
+    {
+        cout << "Restored state from " << g_snapshot_path << endl;
+    }
+    else
+    {
+        cout << "No usable snapshot at " << g_snapshot_path
+             << ", starting empty" << endl;
+    }
+
+    // Persist periodically so an unclean shutdown loses at most one
+    // interval's worth of registrations.
+    thread snapshot_thread([]()
+    {
+        while (g_running)
+        {
+            std::this_thread::sleep_for(kSnapshotInterval);
+            if (!g_running) break;
+            if (!g_state.save_snapshot(g_snapshot_path))
+            {
+                cerr << "Warning: failed to write snapshot to "
+                     << g_snapshot_path << endl;
+            }
+        }
+    });
+    snapshot_thread.detach();
+
     // thread to handle console input
     thread exit_thread([]()
     {
@@ -367,17 +407,37 @@ int main(int argc, char *argv[])
             getline(cin, inp);
             if (inp == "quit")
             {
+                cout << "Saving state..." << endl;
+                if (!g_state.save_snapshot(g_snapshot_path))
+                {
+                    cerr << "Warning: snapshot write failed" << endl;
+                }
                 exit(0);
             }
         }
     });
     exit_thread.detach(); // detach
 
+    // Save on SIGINT/SIGTERM as well, so Ctrl-C does not discard state.
+    //
+    // sigaction with sa_flags = 0 rather than signal(): glibc's signal()
+    // installs handlers with SA_RESTART, which silently restarts the
+    // blocking accept() below instead of failing it with EINTR. With
+    // SA_RESTART the flag gets set but the accept loop never notices, so
+    // the shutdown save never runs.
+    struct sigaction sa;
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+
     // handle incoming client connections
-    while (1)
+    while (g_running)
     {
         if ((incomsock = accept(serversock, (struct sockaddr *)&serveradd, (socklen_t *)&length)) < 0)
         {
+            if (!g_running) break; // interrupted by our own signal handler
             cout << "------- Unable to accept incoming connection -------" << endl;
             continue;
         }
@@ -388,5 +448,11 @@ int main(int argc, char *argv[])
         thread(managepeer, incomsock).detach();
     }
 
+    cout << "\nShutting down, saving state..." << endl;
+    if (!g_state.save_snapshot(g_snapshot_path))
+    {
+        cerr << "Warning: snapshot write failed" << endl;
+    }
+    close(serversock);
     return 0;
 }

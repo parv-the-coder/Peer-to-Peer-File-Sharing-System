@@ -25,6 +25,7 @@ add_executable(tracker
   src/tracker/main.cpp
   src/tracker/tracker_state.cpp
   src/tracker/session_manager.cpp
+  src/tracker/persistence.cpp
 )
 target_link_libraries(tracker PRIVATE p2p_common)
 

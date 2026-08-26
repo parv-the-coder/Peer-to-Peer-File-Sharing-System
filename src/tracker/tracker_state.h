@@ -106,6 +106,13 @@ public:
   // Called when a connection drops, gracefully or not.
   void handle_disconnect(const std::string &username);
 
+  // Persistence (implemented in persistence.cpp). The snapshot holds
+  // accounts, groups and file metadata; it deliberately does not hold
+  // connected flags or session tokens, both of which are properties of a
+  // live socket and must not survive a restart.
+  bool save_snapshot(const std::string &path) const;
+  bool load_snapshot(const std::string &path);
+
 private:
   bool user_exists_locked(const std::string &name) const;
   bool group_exists_locked(const std::string &gid) const;
