@@ -86,6 +86,8 @@ public:
   Result list_requests(const std::string &gid, const std::string &owner) const;
   Result accept_request(const std::string &gid, const std::string &applicant,
                         const std::string &owner);
+  Result reject_request(const std::string &gid, const std::string &applicant,
+                        const std::string &owner);
   Result list_groups() const;
 
   // Files.

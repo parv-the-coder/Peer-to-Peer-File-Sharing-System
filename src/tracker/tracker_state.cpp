@@ -209,6 +209,30 @@ Result TrackerState::accept_request(const std::string &gid,
                     " *******"};
 }
 
+Result TrackerState::reject_request(const std::string &gid,
+                                    const std::string &applicant,
+                                    const std::string &owner) {
+  std::unique_lock lock(mtx_);
+  if (!user_exists_locked(applicant)) {
+    return {false, "------- No such User ID: " + applicant + " ------"};
+  }
+  auto it = groups_.find(gid);
+  if (it == groups_.end()) {
+    return {false, "------- No such group ID: " + gid + " ------"};
+  }
+  if (it->second.groupmaster != owner) {
+    return {false, "------ Access denied. You are not the group owner of ID " +
+                       gid + " -------"};
+  }
+  if (!it->second.isapplicant(applicant)) {
+    return {false, "------- This user (ID: " + applicant +
+                       ") has no pending requests -------"};
+  }
+  it->second.applicants.erase(applicant);
+  return {true, "******* Request rejected for User ID: " + applicant +
+                    " *******"};
+}
+
 Result TrackerState::list_groups() const {
   std::shared_lock lock(mtx_);
   std::string msg =

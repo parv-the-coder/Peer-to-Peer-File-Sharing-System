@@ -71,6 +71,7 @@ void displaycomds()
     cout << "leave_group <groupid>\n";
     cout << "list_requests <groupid>\n";
     cout << "accept_request <groupid> <username>\n";
+    cout << "reject_request <groupid> <username>\n";
     cout << "list_groups\n";
     cout << "list_files <groupid>\n";
     cout << "upload_file <groupid> <filepath>\n";
@@ -517,6 +518,19 @@ int main(int argc, char *argv[])
                     return; 
                 } 
                 cout << sendcomd(serversock, "accept_request " + session_token + " " + cmds[1] + " " + cmds[2]) << endl; 
+            });
+        };
+
+        cmdMap["reject_request"] = [&]() 
+        {
+            logincheck([&]() 
+            {
+                if (length != 3) 
+                { 
+                    cout << "Usage: reject_request <groupid> <user>\n"; 
+                    return; 
+                } 
+                cout << sendcomd(serversock, "reject_request " + session_token + " " + cmds[1] + " " + cmds[2]) << endl; 
             });
         };
 

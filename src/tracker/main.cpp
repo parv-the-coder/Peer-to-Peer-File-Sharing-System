@@ -138,6 +138,11 @@ static string dispatch(const vector<string> &comds, const string &peer_ip)
         if (n != 4) return "-----Invalid Arguments-----";
         return g_state.accept_request(comds[2], comds[3], user).message;
     }
+    if (cmd == "reject_request")
+    {
+        if (n != 4) return "-----Invalid Arguments-----";
+        return g_state.reject_request(comds[2], comds[3], user).message;
+    }
     if (cmd == "list_groups")
     {
         return g_state.list_groups().message;
