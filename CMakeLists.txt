@@ -9,6 +9,8 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif()
 
+add_compile_options(-Wall -Wextra)
+
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 

@@ -222,7 +222,15 @@ void handling_peer_conn(string ip, string port)
         return;
     }
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY; // any address
+    // Honour the address the user actually asked for. This previously
+    // bound INADDR_ANY unconditionally and ignored `ip` entirely, so
+    // passing 127.0.0.1 still listened on every interface -- the
+    // argument looked like it constrained the bind and did not.
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) != 1)
+    {
+        cout << "------- Invalid listening address: " << ip << " -------" << endl;
+        return;
+    }
     int listen_port = 0;
     if (!p2p::parse_int(port, listen_port) || listen_port <= 0 || listen_port > 65535)
     {
