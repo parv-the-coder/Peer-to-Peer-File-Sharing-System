@@ -35,5 +35,7 @@ add_executable(client
   src/client/main.cpp
   src/client/upload_registry.cpp
   src/client/peer_server.cpp
+  src/client/tracker_client.cpp
+  src/client/downloader.cpp
 )
 target_link_libraries(client PRIVATE p2p_common)
