@@ -21,6 +21,8 @@
 #include <openssl/evp.h>
 #include <atomic>
 
+#include "client/peer_server.h"
+#include "client/upload_registry.h"
 #include "common/hash.h"
 #include "common/message.h"
 #include "common/socket_io.h"
@@ -37,9 +39,8 @@ string peername; // name of peer
 string session_token; // issued by the tracker at login; proves identity
 bool connected; // is connected
 int serversock; // server socket
-bool noaccept = false; // flag for accept
-int listenSock; // listen socket
-unordered_map<string,string> uploaded_files; // fname to fullpath
+p2p::UploadRegistry uploaded_files; // fname -> local path, mutex-guarded
+p2p::PeerServer *peer_server = nullptr; // serves GET_PIECE to other peers
 
 // Download tracking
 struct DownloadInfo 
@@ -104,173 +105,6 @@ void logincheck(function<void()> action)
         return; 
     } 
     action();
-}
-
-// worker pool
-queue<int> quetask; // queue for tasks
-mutex mtx; // mutex for queue
-condition_variable cv; // condition variable
-bool poolstop = false; // stop flag
-
-// serve peer requests
-void handling_peer_req(int peersock) 
-{
-    string buff;
-    if (!recv_framed(peersock, buff))
-    {
-        close(peersock);
-        return;
-    }
-
-    vector<string> comds = split_args(buff);
-
-    if (comds.empty())
-    {
-        close(peersock); 
-        return; 
-    } 
-
-    // if get piece
-    if (comds[0] == string("GET_PIECE")) 
-    { 
-        if (comds.size() < 3) 
-        { 
-            close(peersock); 
-            return; 
-        }
-
-        string fname = comds[1]; // file name
-        int index = 0; // piece index
-        // Peer-supplied: stoi would throw on garbage and, on a worker
-        // thread, terminate the whole client.
-        if (!p2p::parse_int(comds[2], index))
-        {
-            close(peersock);
-            return;
-        }
-
-        if (index < 0) 
-        { 
-            close(peersock); 
-            return; 
-        }
-        if (uploaded_files.find(fname) == uploaded_files.end()) 
-        { 
-            close(peersock); 
-            return; 
-        }
-        string fullpath = uploaded_files[fname]; // get path
-
-        int fd = open(fullpath.c_str(), O_RDONLY); // open file
-        if (fd < 0) 
-        { 
-            close(peersock); 
-            return; 
-        }
-
-        off_t offset = (off_t)index * PIECE_SIZE; // offset for piece
-        vector<char> buf(PIECE_SIZE);
-        ssize_t n = pread(fd, buf.data(), PIECE_SIZE, offset);
-        close(fd);
-
-        if (n > 0)
-        {
-            // piece payload is framed the same way as every other message:
-            // [4-byte length][data]
-            send_framed(peersock, string(buf.data(), n));
-        }
-    }
-    close(peersock);
-}
-
-void worker_thread() 
-{
-    while (true) 
-    {
-        int s;
-        {
-            unique_lock<mutex> lock(mtx); // lock
-            cv.wait(lock, [] { return !quetask.empty() || poolstop; }); // wait for task or stop
-            // if stop and no task, return
-            if (poolstop && quetask.empty()) 
-            {
-                return; 
-            }
-            s = quetask.front(); // getting task
-            quetask.pop();
-        }
-        handling_peer_req(s);
-    }
-}
-
-void handling_peer_conn(string ip, string port) 
-{
-    int sock; // socket
-    int choice = 1; // option
-    struct sockaddr_in addr; // address
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-    {
-        perror("------- Failed to create socket -------");
-        return;
-    }
-    // SO_REUSEADDR only, not SO_REUSEPORT: two clients sharing one peer
-    // port would have the kernel split GET_PIECE requests between them,
-    // and only one of them actually has the file.
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &choice, sizeof(choice)))
-    {
-        perror("------- Failed to set socket options -------");
-        return;
-    }
-    addr.sin_family = AF_INET;
-    // Honour the address the user actually asked for. This previously
-    // bound INADDR_ANY unconditionally and ignored `ip` entirely, so
-    // passing 127.0.0.1 still listened on every interface -- the
-    // argument looked like it constrained the bind and did not.
-    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) != 1)
-    {
-        cout << "------- Invalid listening address: " << ip << " -------" << endl;
-        return;
-    }
-    int listen_port = 0;
-    if (!p2p::parse_int(port, listen_port) || listen_port <= 0 || listen_port > 65535)
-    {
-        cout << "------- Invalid listening port: " << port << " -------" << endl;
-        return;
-    }
-    addr.sin_port = htons(listen_port); // port
-
-    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-    {
-        perror("Bind Error");
-        cout << "Is another client already using peer port " << port << "?" << endl;
-        exit(EXIT_FAILURE);
-    }
-
-    if (listen(sock, 20) < 0) 
-    { 
-        perror("listen"); 
-        exit(EXIT_FAILURE); 
-    }
-
-    listenSock = sock; // setting listening socket
-    int len = sizeof(addr), newsck;
-    
-    while (!noaccept) 
-    {
-        newsck = accept(sock, (struct sockaddr *)&addr, (socklen_t *)&len);
-        if (newsck < 0) 
-        {
-            if (noaccept) break;
-            cout << "-------- Failed to establish client connection --------" << endl;
-            continue;
-        }
-        {
-            lock_guard<mutex> lock(mtx);
-            quetask.push(newsck); // pushing task
-        }
-        cv.notify_one();
-    }
-    close(sock);
 }
 
 string sendcomd(int sock, const string &cmd)
@@ -360,14 +194,15 @@ int main(int argc, char *argv[])
         return 0; 
     }
 
-    // thread pool to serve peers
-    vector<thread> workers; // workers
-    int threadsno = 4; // number of threads
-    for (int i = 0; i < threadsno; ++i) 
+    // Start serving pieces to other peers.
+    p2p::PeerServer server(uploaded_files);
+    if (!server.start(hostip, hostport))
     {
-        workers.emplace_back(worker_thread); // start threads
+        cout << "------- Could not start peer server, exiting -------" << endl;
+        close(serversock);
+        return 1;
     }
-    thread help_object(handling_peer_conn, hostip, hostport); // thread for peer conn
+    peer_server = &server;
     displaycomds(); // show commands
 
     while (1) 
@@ -402,9 +237,9 @@ int main(int argc, char *argv[])
                 }
                 string gid = cmds[1], fname = cmds[2];
                 // Remove from local uploaded_files
-                if (uploaded_files.find(fname) != uploaded_files.end()) 
+                if (uploaded_files.contains(fname))
                 {
-                    uploaded_files.erase(fname); // erase
+                    uploaded_files.remove(fname);
                     cout << "Stopped sharing file: " << fname << " in group " << gid << endl;
                 } 
                 else 
@@ -600,7 +435,7 @@ int main(int argc, char *argv[])
                 size_t pos = fpath.find_last_of("/"); // find last /
                 string fname = (pos == string::npos) ? fpath : fpath.substr(pos + 1); // get file name
                 // store file locally so peer server can serve pieces
-                uploaded_files[fname] = fpath;
+                uploaded_files.add(fname, fpath);
 
                 string cmd = "upload_file " + session_token + " " + gid + " " + fname + " " + to_string(fsize) + " " + fullhash + " " + to_string(num_pieces);
                 for (auto &h : piece_hashes) cmd += " " + h; // add hashes
@@ -1015,7 +850,7 @@ int main(int argc, char *argv[])
                     cout << "[C] " << gid << " " << fname << " downloaded successfully.\n";
                     
                     // add downloaded file to uploaded_files so this peer can now serve it to others
-                    uploaded_files[fname] = fullout;
+                    uploaded_files.add(fname, fullout);
                     
                     // tell tracker that this peer now has the file so other peers can download
                     string notify_cmd = "file_downloaded " + session_token + " " + gid + " " + fname; 
@@ -1111,25 +946,12 @@ int main(int argc, char *argv[])
 
         // handle exit
         if (cmds[0] == "exit") {
-            cout << "------- Exiting Client ---------" << endl; 
+            cout << "------- Exiting Client ---------" << endl;
             if (serversock > 0)
             {
                 close(serversock);
-            } 
-                
-            noaccept = true; // set flag
-            shutdown(listenSock, SHUT_RDWR); 
-            close(listenSock); 
-            if (help_object.joinable()) help_object.join(); // join thread
-            {
-                lock_guard<mutex> lock(mtx); 
-                poolstop = true; // set flag
             }
-            cv.notify_all();
-            for (auto &t : workers)
-            {
-                t.join(); // join threads
-            } 
+            server.stop(); // joins the accept loop and worker pool
             return 0;
         } 
         else if (cmds[0] == "commands") 
@@ -1152,13 +974,6 @@ int main(int argc, char *argv[])
         }
     }
     
-    lock_guard<mutex> lock(mtx); 
-    poolstop = true;
-    cv.notify_all();
-    
-    for (auto &t : workers)
-    {
-        t.join();
-    } 
+    server.stop();
     return 0;
 }
