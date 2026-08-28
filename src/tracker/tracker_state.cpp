@@ -1,6 +1,5 @@
 #include "tracker/tracker_state.h"
 
-#include <iostream>
 #include <mutex>
 
 namespace p2p {
@@ -37,11 +36,8 @@ void Group::deluser(const std::string &s) {
   }
   if (!participants.empty()) {
     groupmaster = *participants.begin();
-    std::cout << "Group " << gid << " new owner is: " << groupmaster
-              << std::endl;
   } else {
     groupmaster = "";
-    std::cout << "Group " << gid << " has no members left" << std::endl;
   }
 }
 
@@ -73,8 +69,6 @@ Result TrackerState::create_user(const std::string &username,
   peer.peername = username;
   peer.password = std::move(ph);
   peers_[username] = std::move(peer);
-  std::cout << "****** ID " << username
-            << " has been registered as a new user. ******" << std::endl;
   return {true,
           "***** ID number " + username + " registered successfully! ******"};
 }
@@ -264,8 +258,6 @@ Result TrackerState::upload_file(const std::string &gid,
   fm.piece_hashes.resize(static_cast<size_t>(num_pieces));
   fm.peers.insert(uname);
   group_files_[gid].insert(fname);
-  std::cout << "Tracker: Registered file " << fname << " size " << size
-            << " pieces " << num_pieces << std::endl;
   return {true, "******* File " + fname + " uploaded to group " + gid +
                     " successfully *******"};
 }

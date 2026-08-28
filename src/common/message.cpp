@@ -1,5 +1,6 @@
 #include "message.h"
 
+#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <limits>
@@ -19,6 +20,11 @@ std::vector<std::string> split_args(const std::string &s) {
 
 bool parse_ll(const std::string &s, long long &out) {
   if (s.empty()) {
+    return false;
+  }
+  // strtoll silently skips leading whitespace, which contradicts the
+  // "complete integer or nothing" contract these are documented with.
+  if (std::isspace(static_cast<unsigned char>(s[0]))) {
     return false;
   }
   errno = 0;

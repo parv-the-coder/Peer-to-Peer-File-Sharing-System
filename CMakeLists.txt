@@ -39,3 +39,30 @@ add_executable(client
   src/client/downloader.cpp
 )
 target_link_libraries(client PRIVATE p2p_common)
+
+option(P2P_BUILD_TESTS "Build unit tests" ON)
+if(P2P_BUILD_TESTS)
+  enable_testing()
+
+  add_executable(unit_tests
+    tests/unit/main.cpp
+    tests/unit/test_hash.cpp
+    tests/unit/test_message.cpp
+    tests/unit/test_auth.cpp
+    tests/unit/test_session.cpp
+    tests/unit/test_tracker_state.cpp
+    src/tracker/tracker_state.cpp
+    src/tracker/session_manager.cpp
+  )
+  target_include_directories(unit_tests PRIVATE tests/unit)
+  target_link_libraries(unit_tests PRIVATE p2p_common)
+  add_test(NAME unit COMMAND unit_tests)
+
+  # Integration tests drive the real binaries, so they need them built.
+  foreach(t e2e disconnect persistence)
+    add_test(NAME ${t}
+             COMMAND ${CMAKE_COMMAND} -E env bash
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/${t}_test.sh)
+    set_tests_properties(${t} PROPERTIES TIMEOUT 180)
+  endforeach()
+endif()
