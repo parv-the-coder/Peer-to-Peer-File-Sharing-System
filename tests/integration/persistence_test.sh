@@ -4,6 +4,9 @@
 # (both properties of a live socket) are not.
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+# Optional first argument selects the build directory, so the same test
+# can be run against a sanitizer build.
+BUILD=${1:-build}
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 TPORT=$((38000 + RANDOM % 2000)); APORT=$((TPORT+1))
 echo "127.0.0.1 $TPORT" > "$WORK/ti.txt"
@@ -13,7 +16,7 @@ DB="$WORK/state.db"
 # exec so the subshell is replaced by the tracker itself and $! is the
 # tracker's own pid, not the subshell's.
 run_tracker() {
-  ( cd "$WORK" && exec "$ROOT/build/tracker" "$WORK/ti.txt" 1 ) > "$WORK/t$1.log" 2>&1 &
+  ( cd "$WORK" && exec "$ROOT/$BUILD/tracker" "$WORK/ti.txt" 1 ) > "$WORK/t$1.log" 2>&1 &
   echo $! > "$WORK/tpid"
   sleep 1
 }
@@ -22,7 +25,7 @@ run_tracker() {
 run_tracker 1
 TPID=$(cat "$WORK/tpid")
 printf 'create_user alice pw\nlogin alice pw\ncreate_group g1\nupload_file g1 %s/f.bin\nexit\n' "$WORK" \
-  | timeout 15 "$ROOT/build/client" "127.0.0.1:$APORT" "$WORK/ti.txt" > "$WORK/c1.log" 2>&1
+  | timeout 15 "$ROOT/$BUILD/client" "127.0.0.1:$APORT" "$WORK/ti.txt" > "$WORK/c1.log" 2>&1
 kill -TERM $TPID 2>/dev/null
 sleep 1.5
 
@@ -37,7 +40,7 @@ TPID=$(cat "$WORK/tpid")
 grep -q "Restored state" "$WORK/t2.log" || { echo "FAIL: did not restore"; cat "$WORK/t2.log"; exit 1; }
 
 OUT=$(printf 'login alice pw\nlist_groups\nlist_files g1\nexit\n' \
-  | timeout 15 "$ROOT/build/client" "127.0.0.1:$APORT" "$WORK/ti.txt" 2>&1)
+  | timeout 15 "$ROOT/$BUILD/client" "127.0.0.1:$APORT" "$WORK/ti.txt" 2>&1)
 kill -9 $TPID 2>/dev/null
 
 echo "after restart:"; echo "$OUT" | grep -E "logged in|g1|f.bin|SIZE" | sed 's/^/  /'

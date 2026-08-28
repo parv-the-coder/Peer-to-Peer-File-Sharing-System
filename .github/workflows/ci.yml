@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libssl-dev
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ThreadSanitizer
+            flags: "-fsanitize=thread -g -O1"
+          - name: Address/UB Sanitizer
+            flags: "-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libssl-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-san -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}"
+
+      - name: Build
+        run: cmake --build build-san -j"$(nproc)"
+
+      # Sanitizers need ASLR entropy lower than some kernels default to,
+      # or they abort at startup with "unexpected memory mapping".
+      - name: Lower ASLR entropy
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Run unit tests under sanitizer
+        run: ./build-san/unit_tests
+
+      # The concurrency test is the regression net for the tracker's
+      # locking: it reported 27 data races before that work and must
+      # report none now.
+      - name: Run concurrency test under sanitizer
+        if: matrix.name == 'ThreadSanitizer'
+        run: bash tests/integration/concurrency_test.sh build-san 12
+
+      # The build directory must be passed explicitly, or these run the
+      # ordinary binaries and the sanitizer job proves nothing.
+      - name: Run end-to-end test under sanitizer
+        run: bash tests/integration/e2e_test.sh build-san
+
+      - name: Run disconnect test under sanitizer
+        run: bash tests/integration/disconnect_test.sh build-san

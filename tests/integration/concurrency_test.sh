@@ -10,14 +10,23 @@ CLIENTS=""
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# Wait for the tracker to be ready rather than assuming a fixed delay:
+# sanitizer builds start several times slower than a plain one.
+wait_for_tracker() {
+  for _ in $(seq 1 100); do
+    grep -q "TRACKER SERVER STARTED" "$1" 2>/dev/null && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
 TPORT=$((40000 + RANDOM % 20000))
 echo "127.0.0.1 $TPORT" > "$WORK/tracker_info.txt"
 
 TSAN_OPTIONS="halt_on_error=0 log_path=$WORK/tsan" \
-  setarch -R "$ROOT/$BUILD/tracker" "$WORK/tracker_info.txt" 1 > "$WORK/tracker.log" 2>&1 &
+  ( cd "$WORK" && exec setarch -R "$ROOT/$BUILD/tracker" "$WORK/tracker_info.txt" 1 ) > "$WORK/tracker.log" 2>&1 &
 TPID=$!
-sleep 2
-grep -q "TRACKER SERVER STARTED" "$WORK/tracker.log" || { echo "tracker failed to start"; cat "$WORK/tracker.log"; exit 1; }
+wait_for_tracker "$WORK/tracker.log" || { echo "tracker failed to start"; cat "$WORK/tracker.log"; exit 1; }
 
 # All clients start at once and contend on the same groups.
 for i in $(seq 1 "$N"); do
