@@ -12,8 +12,11 @@
 //   V 1
 //   USER  <name> <salt> <hash>
 //   GROUP <gid> <master> <nparts> <p...> <napps> <a...>
-//   FILE  <fname> <size> <fullhash> <npieces> <h...> <npeers> <peer...>
+//   FILE  <groupid>/<fname> <size> <fullhash> <npieces> <h...> <npeers> <peer...>
 //   GFILE <gid> <count> <fname...>
+//
+// FILE records store the map key verbatim, which is "<groupid>/<fname>"
+// -- files are identified per group, not by filename alone.
 //
 // A whitespace-separated format is safe here rather than merely
 // convenient: every one of these fields arrives over a protocol that is

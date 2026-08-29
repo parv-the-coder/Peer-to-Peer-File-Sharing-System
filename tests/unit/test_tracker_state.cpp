@@ -167,3 +167,43 @@ TEST(concurrent_writers_do_not_lose_updates) {
   }
   CHECK_EQ(count, size_t(kThreads * kPerThread));
 }
+
+// Files are identified by (group, filename). Keyed by filename alone,
+// an upload to one group silently overwrote an unrelated file of the
+// same name in another group.
+TEST(same_filename_in_two_groups_stays_independent) {
+  TrackerState s;
+  s.create_user("alice", "pw");
+  s.login("alice", "pw", "127.0.0.1", "1");
+  s.create_group("g1", "alice");
+  s.create_group("g2", "alice");
+
+  s.upload_file("g1", "data.bin", "alice", 100, std::string(40, 'a'), 1,
+                {std::string(40, '1')});
+  s.upload_file("g2", "data.bin", "alice", 999999, std::string(40, 'b'), 2,
+                {std::string(40, '2'), std::string(40, '2')});
+
+  Result r1 = s.download_file("g1", "data.bin", "alice");
+  Result r2 = s.download_file("g2", "data.bin", "alice");
+  CHECK(r1.message.find("SIZE 100 ") != std::string::npos);
+  CHECK(r1.message.find(std::string(40, 'a')) != std::string::npos);
+  CHECK(r2.message.find("SIZE 999999 ") != std::string::npos);
+  CHECK(r2.message.find(std::string(40, 'b')) != std::string::npos);
+}
+
+// A downloader builds its output path as <destination>/<filename>, so a
+// filename carrying path separators could escape the destination
+// directory if a downloader copied it out of list_files.
+TEST(upload_rejects_path_traversal_filenames) {
+  TrackerState s;
+  s.create_user("alice", "pw");
+  s.create_group("g1", "alice");
+  const std::string h(40, 'a');
+
+  CHECK(!s.upload_file("g1", "../../.bashrc", "alice", 10, h, 1, {h}).ok);
+  CHECK(!s.upload_file("g1", "sub/dir.bin", "alice", 10, h, 1, {h}).ok);
+  CHECK(!s.upload_file("g1", "..", "alice", 10, h, 1, {h}).ok);
+  CHECK(!s.upload_file("g1", ".", "alice", 10, h, 1, {h}).ok);
+  // an ordinary name still works
+  CHECK(s.upload_file("g1", "ok.bin", "alice", 10, h, 1, {h}).ok);
+}

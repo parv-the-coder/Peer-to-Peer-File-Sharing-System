@@ -1,6 +1,7 @@
 #include "tracker/tracker_state.h"
 
 #include <mutex>
+#include <string>
 
 namespace p2p {
 
@@ -40,6 +41,34 @@ void Group::deluser(const std::string &s) {
     groupmaster = "";
   }
 }
+
+namespace {
+
+// A shared file is identified by (group, filename), not filename alone.
+// Keyed by filename alone, uploading "data.bin" to one group silently
+// overwrote the metadata of an unrelated "data.bin" in another group --
+// members of the first group were then handed the second group's size
+// and hashes.
+//
+// Safe to build as a single string because valid_filename below rejects
+// any '/', so the last '/' always separates the two parts.
+std::string file_key(const std::string &gid, const std::string &fname) {
+  return gid + "/" + fname;
+}
+
+// Shared filenames are basenames. Rejecting separators and the dot
+// entries keeps a hostile uploader from registering a name like
+// "../../.bashrc", which a downloader copying that name out of
+// list_files would then write outside their chosen destination.
+bool valid_filename(const std::string &fname) {
+  if (fname.empty() || fname == "." || fname == "..") {
+    return false;
+  }
+  return fname.find('/') == std::string::npos &&
+         fname.find('\\') == std::string::npos;
+}
+
+} // namespace
 
 bool TrackerState::user_exists_locked(const std::string &name) const {
   return peers_.find(name) != peers_.end();
@@ -250,7 +279,10 @@ Result TrackerState::upload_file(const std::string &gid,
   if (!user_exists_locked(uname) || !git->second.partofgroup(uname)) {
     return {false, "------ You are not part of Group ID " + gid + " -------"};
   }
-  FileMeta &fm = files_[fname];
+  if (!valid_filename(fname)) {
+    return {false, "------- Invalid filename: " + fname + " -------"};
+  }
+  FileMeta &fm = files_[file_key(gid, fname)];
   fm.size = size;
   fm.fullhash = fullhash;
   fm.num_pieces = num_pieces;
@@ -279,7 +311,7 @@ Result TrackerState::list_files(const std::string &gid,
   }
   std::string msg = "######## Files in Group " + gid + " ########\n";
   for (const auto &fname : fit->second) {
-    auto mit = files_.find(fname);
+    auto mit = files_.find(file_key(gid, fname));
     if (mit == files_.end()) {
       continue;
     }
@@ -304,7 +336,7 @@ Result TrackerState::download_file(const std::string &gid,
   if (!group_has_file_locked(gid, fname)) {
     return {false, "------- No such file in group " + gid + " -------"};
   }
-  auto mit = files_.find(fname);
+  auto mit = files_.find(file_key(gid, fname));
   if (mit == files_.end()) {
     return {false, "------- No such file in group " + gid + " -------"};
   }
@@ -341,7 +373,7 @@ Result TrackerState::file_downloaded(const std::string &gid,
   if (pit == peers_.end()) {
     return {false, "ERROR: Peer not found"};
   }
-  auto mit = files_.find(fname);
+  auto mit = files_.find(file_key(gid, fname));
   if (mit != files_.end()) {
     mit->second.peers.insert(peername);
   }
@@ -363,7 +395,7 @@ Result TrackerState::stop_share(const std::string &gid,
   if (!group_has_file_locked(gid, fname)) {
     return {false, "ERROR: File not found in group"};
   }
-  auto mit = files_.find(fname);
+  auto mit = files_.find(file_key(gid, fname));
   if (mit == files_.end()) {
     return {false, "ERROR: File metadata not found"};
   }
