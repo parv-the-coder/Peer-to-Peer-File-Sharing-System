@@ -1,116 +1,165 @@
+# P2P File Sharing System
 
-# Peer-to-Peer File Sharing System
+A BitTorrent-style peer-to-peer file sharing system in C++17. A central
+tracker coordinates metadata — accounts, groups, and which peers hold
+which files — while clients transfer file data **directly to each other**.
+File contents never pass through the tracker.
 
-## Compilation and Execution Instructions
-
-### Compilation
-Compile both client and tracker:
-```bash
-cd ../client
-cd ../tracker
 ```
-```bash
-g++ -o client client.cpp -lssl -lcrypto -lpthread
-g++ -o tracker tracker.cpp -lpthread
+                  ┌──────────────┐
+                  │   TRACKER    │   accounts · groups · file metadata
+                  └──────┬───────┘   who currently has what
+            control      │      control
+         ┌───────────────┴───────────────┐
+   ┌─────┴──────┐                  ┌─────┴──────┐
+   │  CLIENT A  │◄────────────────►│  CLIENT B  │
+   └────────────┘   file pieces    └────────────┘
+                    (direct)
 ```
 
-### Execution
-1. **Start the Tracker:**
-   ```bash
-   ./tracker <tracker_config_file> 1
-   ```
-   - `<tracker_config_file>`: Text file with tracker IP and port (e.g., `127.0.0.1 9000`)
-2. **Start a Client:**
-   ```bash
-   ./client <host_ip:host_port> <tracker_config_file>
-   ```
-   - `<host_ip:host_port>`: IP and port for this client to listen for peer connections
-   - `<tracker_config_file>`: Same format as above
+---
 
-## Architectural Overview
+## Features
 
-### Design
-- **Tracker**: Centralized metadata server. Handles authentication, group management, file registration and peer discovery. Does not store file data.
-- **Client**: Each peer can upload/download files, serve pieces to others and interact with the tracker. Clients communicate directly for file transfers.
-- **Decentralized Data**: File data is distributed among peers. Tracker only coordinates metadata and peer lists.
-- **Threading**: Both tracker and client use threads for concurrent socket handling and downloads.
+- **Parallel piece-based transfer** — files split into 512 KB pieces,
+  fetched concurrently from multiple peers, each worker starting at a
+  different peer to spread load across the swarm
+- **Integrity checking** — every piece verified against its SHA-1 *before*
+  it is written, and the reassembled file verified as a whole
+- **Resumable downloads** — piece progress persisted after each piece; an
+  interrupted download resumes instead of restarting
+- **Swarm growth** — a client that completes a download automatically
+  becomes a seeder for it
+- **Session-token authentication** — salted password hashing, server-issued
+  tokens, peer addresses taken from the socket rather than trusted from
+  the client
+- **Group access control** — private groups with owner-approved membership
+- **Crash-safe persistence** — tracker state snapshotted atomically and
+  restored on restart
 
-## Key Algorithms
+---
 
+## Build
 
-### Piecewise File Transfer & Round-Robin Peer Selection
-- Files are split into fixed-size pieces (default: 512KB).
-- Each piece is hashed (SHA1) for integrity.
-- Downloaded pieces are verified before being written to disk.
-- Multiple threads download pieces in parallel from available peers.
-- **Round-Robin Peer Selection:**
-  - To balance load and avoid contention, each download worker thread rotates the peer list so that it starts downloading from a different peer.
-  - This is implemented by rotating the vector of available peers for each thread, ensuring that requests for pieces are distributed evenly across all peers.
-  - If a piece download fails from one peer, the thread tries the next peer in its rotated order, up to a maximum number of retries.
-  - This approach helps maximize bandwidth usage and avoids overloading any single peer.
+Requires CMake ≥ 3.16, a C++17 compiler, and OpenSSL.
 
-### Hash Verification
-- Each file and piece is hashed using OpenSSL SHA1.
-- Piece hashes are checked after download, full file hash is checked after all pieces are assembled.
+```bash
+sudo apt-get install cmake g++ libssl-dev     # Debian/Ubuntu
 
-### Download Progress Tracking
-- Each download is tracked with a `DownloadInfo` struct, recording status of each piece (pending, downloading, completed, failed).
-- Progress and status are shown via the `show_downloads` command.
+cmake -S . -B build
+cmake --build build -j"$(nproc)"
+```
 
-## Data Structures and Rationale
+## Run
 
-### Tracker
-- `client`: Stores peer info, connection state, and files shared.
-- `group`: Manages group membership, applicants, and ownership.
-- `FileMeta`: Stores file size, hashes, piece hashes, and list of seeders.
-- Maps for users, groups, files, and group-files for fast lookup.
+**1. Start the tracker** (config file holds `<ip> <port>`):
 
-### Client
-- `DownloadInfo`: Tracks all metadata and status for each download.
-- `active_downloads`: Map of filename to `DownloadInfo` for concurrent downloads.
-- Mutexes for thread safety in download tracking and peer serving.
+```bash
+echo "127.0.0.1 9000" > tracker_info.txt
+./build/tracker tracker_info.txt 1
+```
 
-## Network Protocol Design and Message Formats
+**2. Start a client**, giving it the address it should listen on for
+peer connections:
 
-- **Transport**: All communication uses TCP sockets.
-- **Tracker Commands**: Text-based commands sent over sockets, e.g.:
-  - `create_user <username> <password>`
-  - `login <username> <password> <ip> <port>`
-  - `upload_file <groupid> <filename> <username> <size> <hash> <num_pieces> <piece_hashes...>`
-  - `download_file <groupid> <filename> <username>`
-- **Peer-to-Peer File Transfer**:
-  - Request: `GET_PIECE <filename> <piece_index>`
-  - Response: [4-byte piece size][piece data]
-- **File Metadata Response**:
-  - `FILE <filename> SIZE <size> HASH <fullhash> PIECES <num_pieces> PIECE_HASHES <hash1> ... <hashN>\nPEERS\n<peername> <ip> <port> ...`
+```bash
+./build/client 127.0.0.1:6001 tracker_info.txt
+```
 
-## Assumptions
-- All peers and tracker run on reachable IPs/ports.
-- Files are not modified during sharing.
-- Peers are trusted to serve correct data (integrity checked via hashes).
+**3. Share a file** — in client A:
 
-## Implemented Features
-- User registration and login
-- Group creation, join, leave, and membership management
-- File upload with piecewise hashing
-- Piecewise file download from multiple peers
-- Download progress and status tracking
-- Full file and piece hash verification
-- Stop sharing files
-- Console commands for all major operations
+```
+create_user alice secret
+login alice secret
+create_group project
+upload_file project /path/to/file.bin
+```
 
-## Testing Procedures
+**4. Fetch it** — in a second client on a different port:
 
-### Functional Testing
-1. **Start tracker and multiple clients on different terminals.**
-2. **Register users and create groups.**
-3. **Upload files from one client.**
-4. **Download files from another client in the same group.**
-5. **Verify file integrity (hashes match).**
-6. **Test concurrent downloads.**
-7. **Test group membership changes and file sharing controls.**
+```
+create_user bob secret
+login bob secret
+join_group project          # then alice runs: accept_request project bob
+download_file project file.bin /path/to/destination/
+show_downloads
+```
 
-## File Integrity
-- All files are split into pieces (default 512KB).
-- Each piece and the full file are hashed using SHA1 for integrity verification.
-- Downloads are verified piecewise and as a whole before completion.
+### Commands
+
+| | |
+|---|---|
+| `create_user <user> <pass>` | register |
+| `login <user> <pass>` / `logout` | session |
+| `create_group <gid>` / `join_group <gid>` / `leave_group <gid>` | groups |
+| `list_requests <gid>` | pending join requests (owner only) |
+| `accept_request <gid> <user>` / `reject_request <gid> <user>` | approve or decline |
+| `list_groups` / `list_files <gid>` | browse |
+| `upload_file <gid> <path>` | share a file |
+| `download_file <gid> <file> <dest>` | fetch a file |
+| `stop_share <gid> <file>` | stop seeding |
+| `show_downloads` | progress |
+| `commands` / `exit` | |
+
+---
+
+## Tests
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+36 unit tests plus four integration tests that drive the real binaries —
+a full upload/download round trip with hash comparison, ungraceful
+disconnect handling, state persistence across restart, and a concurrency
+test intended for sanitizer builds.
+
+**Under ThreadSanitizer:**
+
+```bash
+cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+cmake --build build-tsan -j"$(nproc)"
+./tests/integration/concurrency_test.sh build-tsan 12
+```
+
+This reports **0 data races**. Against the tracker as it stood before the
+locking work (`dd2d724~1`, i.e. commit `546bb65`) the same test reports
+**27** — to reproduce that, check out the older commit and copy this
+script in, since it was added alongside the fix.
+
+---
+
+## Layout
+
+```
+src/common/    framing, parsing, hashing, credentials   (shared)
+src/tracker/   state, sessions, persistence, dispatch
+src/client/    REPL, tracker connection, peer server, downloader
+tests/unit/    36 tests + a small harness
+tests/integration/  four scripts driving the real binaries
+```
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, thread model, locking strategy, how a transfer works |
+| [PROTOCOL.md](docs/PROTOCOL.md) | exact wire format for both protocols |
+| [DECISIONS.md](docs/DECISIONS.md) | every significant choice, the alternatives, and the known downsides |
+| [INTERVIEW_PREP.md](docs/INTERVIEW_PREP.md) | the defects this rewrite fixed and how each was proven |
+
+---
+
+## Notes on scope
+
+This began as a university project and was rewritten to fix a set of real
+defects — an unsynchronised tracker, no actual authentication, and a
+crash any client could trigger remotely. `DECISIONS.md` records what was
+chosen and what was knowingly left out; the significant remaining
+limitations are that passwords use SHA-256 rather than a slow KDF like
+Argon2, and that there is no TLS, so credentials cross the wire in
+plaintext. Both are documented rather than glossed over.
