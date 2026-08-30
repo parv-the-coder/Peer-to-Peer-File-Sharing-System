@@ -398,7 +398,12 @@ int main(int argc, char *argv[])
                     cout << "Usage: download_file <groupid> <filename> <dest_path>\n";
                     return;
                 }
-                downloader.download(cmds[1], cmds[2], cmds[3]);
+                // Returns immediately; the transfer runs on its own thread so
+                // several files can download at once and the prompt stays live.
+                if (downloader.start(cmds[1], cmds[2], cmds[3]))
+                {
+                    cout << "Download started in background. Use show_downloads for progress.\n";
+                }
             });
         };
 
@@ -413,6 +418,7 @@ int main(int argc, char *argv[])
         // handle exit
         if (cmds[0] == "exit") {
             cout << "------- Exiting Client ---------" << endl;
+            downloader.wait_all(); // let in-flight downloads finish
             tracker.disconnect();
             server.stop(); // joins the accept loop and worker pool
             return 0;

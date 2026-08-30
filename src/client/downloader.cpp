@@ -21,22 +21,33 @@
 using namespace std;
 
 namespace p2p {
+namespace {
 
-void Downloader::download(const string &gid, const string &fname,
-                          const string &destpath_in)
+// Several downloads can run at once, each with its own worker threads.
+// Composing a whole line and writing it under one lock keeps their
+// progress output from interleaving mid-line.
+std::mutex g_cout_mtx;
+
+void log_line(const std::string &line) {
+  std::lock_guard<std::mutex> lock(g_cout_mtx);
+  std::cout << line << std::flush;
+}
+
+} // namespace
+
+void Downloader::run(const string &gid, const string &fname,
+                     const string &destpath_in)
 {
   string destpath = destpath_in;
+  // Clears the active flag however this function exits -- there are
+  // several early returns (no such file, no peers, cannot open output)
+  // and leaving the flag set would make the file permanently
+  // un-retryable for the life of the process.
+  struct ActiveGuard {
+    Downloader *d; const string &f;
+    ~ActiveGuard() { d->mark_inactive(f); }
+  } guard{this, fname};
 
-  
-  // checking if already downloading this file
-  {
-      lock_guard<mutex> lock(mtx_); 
-      if (downloads_.find(fname) != downloads_.end() && downloads_[fname].is_active) 
-      {
-          cout << "File " << fname << " is already being downloaded.\n";
-          return;
-      }
-  }
 
   // query tracker for file metadata and peers
   string tracker_cmd = "download_file " + tracker_.token() + " " + gid + " " + fname; 
@@ -418,7 +429,9 @@ void Downloader::download(const string &gid, const string &fname,
   string dhash = sha1_file_hex(fullout); // get hash
   if (dhash == fullhash) 
   {
-      cout << "[C] " << gid << " " << fname << " downloaded successfully.\n";
+      // Assignment brief section 8 specifies exactly this format for a
+      // completed download: [C] [group_id] filename
+      log_line("[C] [" + gid + "] " + fname + "\n");
       
       // add downloaded file to uploaded_files so this peer can now serve it to others
       registry_.add(fname, fullout);
@@ -447,6 +460,52 @@ void Downloader::download(const string &gid, const string &fname,
           }
       }
       save_state();
+  }
+}
+
+Downloader::~Downloader() { wait_all(); }
+
+void Downloader::mark_inactive(const string &fname) {
+  lock_guard<mutex> lock(mtx_);
+  auto it = downloads_.find(fname);
+  if (it != downloads_.end()) {
+    it->second.is_active = false;
+  }
+}
+
+bool Downloader::start(const string &gid, const string &fname,
+                       const string &destpath) {
+  {
+    lock_guard<mutex> lock(mtx_);
+    auto it = downloads_.find(fname);
+    if (it != downloads_.end() && it->second.is_active) {
+      log_line("File " + fname + " is already being downloaded.\n");
+      return false;
+    }
+    // Claim the slot before releasing the lock so a second start() for
+    // the same file cannot slip in behind this one.
+    DownloadInfo placeholder;
+    placeholder.group_id = gid;
+    placeholder.filename = fname;
+    placeholder.is_active = true;
+    downloads_[fname] = placeholder;
+  }
+
+  lock_guard<mutex> tl(threads_mtx_);
+  threads_.emplace_back([this, gid, fname, destpath] { run(gid, fname, destpath); });
+  return true;
+}
+
+void Downloader::wait_all() {
+  vector<thread> pending;
+  {
+    lock_guard<mutex> lock(threads_mtx_);
+    pending.swap(threads_);
+  }
+  for (auto &t : pending) {
+    if (t.joinable()) {
+      t.join();
+    }
   }
 }
 

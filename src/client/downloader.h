@@ -2,6 +2,7 @@
 
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -40,20 +41,37 @@ public:
   Downloader(TrackerClient &tracker, UploadRegistry &registry)
       : tracker_(tracker), registry_(registry) {}
 
-  // Runs one download to completion. Blocks until every piece is fetched
-  // or retries are exhausted.
-  void download(const std::string &gid, const std::string &fname,
-                const std::string &destpath);
+  ~Downloader();
+
+  // Starts a download on its own thread and returns immediately, so the
+  // REPL stays responsive and several files can be fetched at once.
+  // Returns false if that file is already downloading.
+  bool start(const std::string &gid, const std::string &fname,
+             const std::string &destpath);
 
   // Human-readable summary of active and completed downloads.
   std::string report() const;
 
+  // Joins every outstanding download thread. Called on exit.
+  void wait_all();
+
 private:
+  // The actual transfer. Runs on a background thread.
+  void run(const std::string &gid, const std::string &fname,
+           const std::string &destpath);
+  void mark_inactive(const std::string &fname);
+
   TrackerClient &tracker_;
   UploadRegistry &registry_;
 
   mutable std::mutex mtx_;
   std::unordered_map<std::string, DownloadInfo> downloads_;
+
+  // Threads are kept so they can be joined at shutdown rather than
+  // detached: a detached download still touching the registry or the
+  // tracker socket while main() tears them down is a use-after-free.
+  std::mutex threads_mtx_;
+  std::vector<std::thread> threads_;
 };
 
 } // namespace p2p

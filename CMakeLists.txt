@@ -59,7 +59,7 @@ if(P2P_BUILD_TESTS)
   add_test(NAME unit COMMAND unit_tests)
 
   # Integration tests drive the real binaries, so they need them built.
-  foreach(t e2e disconnect persistence)
+  foreach(t e2e disconnect persistence concurrent_download)
     add_test(NAME ${t}
              COMMAND ${CMAKE_COMMAND} -E env bash
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/${t}_test.sh)
