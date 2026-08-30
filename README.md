@@ -125,9 +125,14 @@ cmake --build build-tsan -j"$(nproc)"
 ```
 
 This reports **0 data races**. Against the tracker as it stood before the
-locking work (`dd2d724~1`, i.e. commit `546bb65`) the same test reports
-**27** — to reproduce that, check out the older commit and copy this
-script in, since it was added alongside the fix.
+locking work the same test reports **27**. To reproduce that:
+
+```bash
+git checkout "$(git log --format=%H --grep='guard all shared state' -1)~1"
+```
+
+then copy this script in — it was added alongside the fix, so it does not
+exist in the older tree.
 
 ---
 
