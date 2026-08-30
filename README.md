@@ -1,8 +1,8 @@
 # P2P File Sharing System
 
 A BitTorrent-style peer-to-peer file sharing system in C++17. A central
-tracker coordinates metadata — accounts, groups, and which peers hold
-which files — while clients transfer file data **directly to each other**.
+**tracker** coordinates metadata — accounts, groups, and which peers hold
+which files — while **clients transfer file data directly to each other**.
 File contents never pass through the tracker.
 
 ```
@@ -17,102 +17,155 @@ File contents never pass through the tracker.
                     (direct)
 ```
 
----
-
-## Features
-
-- **Parallel piece-based transfer** — files split into 512 KB pieces,
-  fetched concurrently from multiple peers, each worker starting at a
-  different peer to spread load across the swarm
-- **Integrity checking** — every piece verified against its SHA-1 *before*
-  it is written, and the reassembled file verified as a whole
-- **Resumable downloads** — piece progress persisted after each piece; an
-  interrupted download resumes instead of restarting
-- **Swarm growth** — a client that completes a download automatically
-  becomes a seeder for it
-- **Session-token authentication** — salted password hashing, server-issued
-  tokens, peer addresses taken from the socket rather than trusted from
-  the client
-- **Group access control** — private groups with owner-approved membership
-- **Crash-safe persistence** — tracker state snapshotted atomically and
-  restored on restart
+Built for IIIT-H Advanced Operating Systems (Monsoon 2025), then rewritten
+to fix a set of real defects — an unsynchronised tracker, no authentication,
+and a remotely triggerable crash. See [what changed](#what-the-rewrite-fixed).
 
 ---
 
-## Build
+## What it does
+
+| Area | Capability |
+|---|---|
+| **Accounts** | Register, login/logout, salted-hash password storage, server-issued session tokens |
+| **Groups** | Create, browse, request to join, owner-approved accept **or reject**, leave (ownership hands on automatically) |
+| **Sharing** | Share a file with a group, list a group's files, stop seeding |
+| **Downloading** | Parallel multi-peer piece fetch, per-piece SHA-1 verification, automatic retry against a different peer, resume after interruption |
+| **Swarm** | A client that finishes a download automatically becomes a seeder |
+| **Progress** | `show_downloads` reports per-file piece counts and status |
+| **Durability** | Tracker state snapshotted atomically and restored on restart |
+| **Robustness** | Dead peers stop being advertised; malformed input is rejected rather than crashing |
+
+### How a transfer actually works
+
+1. **Upload** — the client SHA-1 hashes the file whole *and* per 512 KB
+   piece, registers the local path so it can serve pieces, and sends only
+   *metadata* to the tracker.
+2. **Discover** — a downloader asks the tracker for that metadata plus the
+   list of peers currently online holding the file.
+3. **Fetch in parallel** — up to 8 worker threads pull pieces at once. Each
+   worker starts at a *different* peer (the peer list is rotated by worker
+   index) so they spread across the swarm instead of all hitting the first
+   seeder.
+4. **Verify before writing** — every piece is checked against its expected
+   SHA-1 *before* it touches the output file. A bad piece is discarded and
+   retried against the next peer, up to 5 attempts.
+5. **Verify the whole** — the reassembled file is checked against the
+   full-file hash.
+6. **Join the swarm** — the client tells the tracker it now has the file.
+
+Because pieces are verified *before* being written, a misbehaving peer can
+waste bandwidth but cannot corrupt your file.
+
+---
+
+## Quick start
 
 Requires CMake ≥ 3.16, a C++17 compiler, and OpenSSL.
 
 ```bash
 sudo apt-get install cmake g++ libssl-dev     # Debian/Ubuntu
-
 cmake -S . -B build
 cmake --build build -j"$(nproc)"
 ```
 
-## Run
-
-**1. Start the tracker** (config file holds `<ip> <port>`):
+**Start the tracker** (config file holds `<ip> <port>`):
 
 ```bash
 echo "127.0.0.1 9000" > tracker_info.txt
 ./build/tracker tracker_info.txt 1
 ```
 
-**2. Start a client**, giving it the address it should listen on for
-peer connections:
+**Client A — share a file:**
 
 ```bash
 ./build/client 127.0.0.1:6001 tracker_info.txt
 ```
-
-**3. Share a file** — in client A:
-
 ```
 create_user alice secret
 login alice secret
-create_group project
-upload_file project /path/to/file.bin
+create_group aos
+upload_file aos /path/to/file.bin
 ```
 
-**4. Fetch it** — in a second client on a different port:
+**Client B — fetch it** (different peer port):
 
+```bash
+./build/client 127.0.0.1:6002 tracker_info.txt
+```
 ```
 create_user bob secret
 login bob secret
-join_group project          # then alice runs: accept_request project bob
-download_file project file.bin /path/to/destination/
+join_group aos                       # alice then runs: accept_request aos bob
+download_file aos file.bin /path/to/dest/
 show_downloads
 ```
 
-### Commands
+Type `commands` for the full list, `exit` to quit, `quit` in the tracker
+console to shut it down.
 
-| | |
+### Command reference
+
+| Command | Purpose |
 |---|---|
-| `create_user <user> <pass>` | register |
-| `login <user> <pass>` / `logout` | session |
-| `create_group <gid>` / `join_group <gid>` / `leave_group <gid>` | groups |
-| `list_requests <gid>` | pending join requests (owner only) |
-| `accept_request <gid> <user>` / `reject_request <gid> <user>` | approve or decline |
-| `list_groups` / `list_files <gid>` | browse |
-| `upload_file <gid> <path>` | share a file |
-| `download_file <gid> <file> <dest>` | fetch a file |
-| `stop_share <gid> <file>` | stop seeding |
-| `show_downloads` | progress |
-| `commands` / `exit` | |
+| `create_user <user> <pass>` | Register an account |
+| `login <user> <pass>` · `logout` | Start / end a session |
+| `create_group <gid>` | Create a group (you become owner) |
+| `join_group <gid>` | Request membership |
+| `leave_group <gid>` | Leave (ownership passes on if you owned it) |
+| `list_groups` | All groups on the network |
+| `list_requests <gid>` | Pending join requests (owner only) |
+| `accept_request <gid> <user>` | Approve a request (owner only) |
+| `reject_request <gid> <user>` | Decline a request (owner only) |
+| `list_files <gid>` | Files shared in a group |
+| `upload_file <gid> <path>` | Share a file |
+| `download_file <gid> <file> <dest>` | Fetch a file |
+| `show_downloads` | Download progress |
+| `stop_share <gid> <file>` | Stop seeding a file |
 
 ---
 
-## Tests
+## Design at a glance
+
+```
+src/common/    framing · parsing · hashing · credentials   (shared)
+src/tracker/   state · sessions · persistence · dispatch
+src/client/    REPL · tracker connection · peer server · downloader
+tests/         36 unit tests + 4 integration scripts
+```
+
+### Key data structures and why
+
+| Structure | Why |
+|---|---|
+| `TrackerState` — 4 hash maps behind **one `shared_mutex`** | Most commands touch several maps at once, so per-map locks would need lock-ordering discipline for little real gain. Reads (`list_*`, `download_file`) run concurrently; writes are exclusive. |
+| `SessionManager` — token → session, **its own mutex** | Every authenticated command validates a token, making it the hottest read in the system. Kept off the state lock so it never queues behind a slow `list_files`. |
+| `FileMeta` keyed by **(group, filename)** | Keyed by filename alone, an upload to one group silently overwrote another group's same-named file. |
+| `UploadRegistry` — mutex-guarded filename → path | Read by every peer-serving thread while the CLI thread mutates it. |
+| Piece-status vector + `.downloading` sidecar | Makes downloads resumable; written after each piece. |
+
+### Protocol in one line
+
+Every message on both protocols is `[4-byte big-endian length][payload]`.
+Length-prefixing is what makes a message spanning multiple TCP segments
+safe — the original code assumed one `read()` returned one whole message,
+which silently truncated large messages. Full grammar in
+[docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+---
+
+## Testing
 
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-36 unit tests plus four integration tests that drive the real binaries —
-a full upload/download round trip with hash comparison, ungraceful
-disconnect handling, state persistence across restart, and a concurrency
-test intended for sanitizer builds.
+36 unit tests (hashing against published known-answer vectors, parser edge
+cases, password handling, session lifetime, tracker state transitions and
+authorisation rules) plus 4 integration scripts that drive the **real
+binaries**: a full upload/download round trip with hash comparison,
+ungraceful-disconnect handling, persistence across restart, and a
+concurrency test for sanitizer builds.
 
 **Under ThreadSanitizer:**
 
@@ -124,27 +177,63 @@ cmake --build build-tsan -j"$(nproc)"
 ./tests/integration/concurrency_test.sh build-tsan 12
 ```
 
-This reports **0 data races**. Against the tracker as it stood before the
-locking work the same test reports **27**. To reproduce that:
-
-```bash
-git checkout "$(git log --format=%H --grep='guard all shared state' -1)~1"
-```
-
-then copy this script in — it was added alongside the fix, so it does not
-exist in the older tree.
+Reports **0 data races**. The same test against the tracker before the
+locking work reports **27**.
 
 ---
 
-## Layout
+## What the rewrite fixed
 
-```
-src/common/    framing, parsing, hashing, credentials   (shared)
-src/tracker/   state, sessions, persistence, dispatch
-src/client/    REPL, tracker connection, peer server, downloader
-tests/unit/    36 tests + a small harness
-tests/integration/  four scripts driving the real binaries
-```
+Each was reproduced before being fixed, not just reasoned about.
+
+| Defect | Impact |
+|---|---|
+| Tracker had **no synchronisation at all** | 12 concurrent clients → **27 ThreadSanitizer races**, now 0. Concurrent hashtable insert vs. lookup corrupts the map, not just stale reads. |
+| **No authentication** | Every command trusted a `<username>` argument — any client could act as any user. Now session tokens. |
+| **Remote crash** | One malformed message killed the tracker for everyone (`std::stoi` throws → `std::terminate`). Client had the same hole via `GET_PIECE`. |
+| **Cross-group corruption** | File metadata keyed by filename globally — uploading to one group overwrote another group's file. |
+| **Path traversal** | An uploader could register `../../.bashrc`. |
+| **Dead peers advertised** | Downloaders burned their full retry budget on peers that had crashed. |
+| **Client-side races** | 3 races on the upload map, plus an fd-reuse race at shutdown. |
+| **Memory leaks** | `new` without `delete`; an unbounded thread vector whose join loop was unreachable. |
+| **Spoofable peer IP** | Login trusted a client-supplied address; now read from the socket. |
+
+---
+
+## Assumptions
+
+- All peers and the tracker are reachable on the addresses they advertise.
+- A shared file is not modified or moved while it is being seeded.
+- Shared filenames are plain basenames (no path separators) — enforced.
+- Peers may serve wrong data; that is caught by per-piece hashing. They are
+  not assumed honest.
+- Group IDs and usernames contain no whitespace (the protocol is
+  whitespace-delimited).
+
+## Limitations
+
+Stated plainly rather than left for you to discover:
+
+- **Passwords use salted SHA-256, not a slow KDF.** Better than plaintext,
+  but bcrypt/scrypt/Argon2 resist offline GPU cracking and SHA-256 does not.
+- **No TLS** — passwords cross the wire in plaintext at login. Salting
+  protects storage, not transport.
+- **Single tracker.** The AOS spec calls for two synchronised trackers; this
+  implements one. See below.
+- **Downloads are blocking** — one `download_file` at a time per client.
+- Up to 30 s of tracker state can be lost on an unclean shutdown (snapshot
+  interval).
+- Thread-per-connection does not scale past tens of concurrent clients;
+  `epoll` would be the answer at larger scale.
+
+### Not implemented from the AOS spec
+
+| Spec section | Requirement | Status |
+|---|---|---|
+| §2.1, §7 | Two trackers with state synchronisation and failover | ✗ single tracker only |
+| §3.3 | Multiple simultaneous downloads per client | ✗ `download_file` blocks |
+| §5.1 | Makefile | ✗ CMake only |
+| §8 | Exact `[C] [group_id] filename` status format | ✗ close, not exact |
 
 ---
 
@@ -152,19 +241,7 @@ tests/integration/  four scripts driving the real binaries
 
 | | |
 |---|---|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, thread model, locking strategy, how a transfer works |
-| [PROTOCOL.md](docs/PROTOCOL.md) | exact wire format for both protocols |
-| [DECISIONS.md](docs/DECISIONS.md) | every significant choice, the alternatives, and the known downsides |
-| [INTERVIEW_PREP.md](docs/INTERVIEW_PREP.md) | the defects this rewrite fixed and how each was proven |
-
----
-
-## Notes on scope
-
-This began as a university project and was rewritten to fix a set of real
-defects — an unsynchronised tracker, no actual authentication, and a
-crash any client could trigger remotely. `DECISIONS.md` records what was
-chosen and what was knowingly left out; the significant remaining
-limitations are that passwords use SHA-256 rather than a slow KDF like
-Argon2, and that there is no TLS, so credentials cross the wire in
-plaintext. Both are documented rather than glossed over.
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, thread model, locking strategy, transfer walkthrough |
+| [PROTOCOL.md](docs/PROTOCOL.md) | Exact wire format for both protocols |
+| [DECISIONS.md](docs/DECISIONS.md) | Every significant choice, the alternatives, the known downsides |
+| [INTERVIEW_PREP.md](docs/INTERVIEW_PREP.md) | The defects fixed and how each was proven |
