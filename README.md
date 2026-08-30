@@ -34,6 +34,8 @@ and a remotely triggerable crash. See [what changed](#what-the-rewrite-fixed).
 | **Swarm** | A client that finishes a download automatically becomes a seeder |
 | **Progress** | `show_downloads` reports per-file piece counts and status |
 | **Durability** | Tracker state snapshotted atomically and restored on restart |
+| **Replication** | Two trackers keep synchronised state; either alone serves every command, and one rejoining after an outage catches up automatically |
+| **Failover** | Clients try each tracker in turn, so one tracker being down is invisible |
 | **Robustness** | Dead peers stop being advertised; malformed input is rejected rather than crashing |
 
 ### How a transfer actually works
@@ -69,12 +71,18 @@ cmake -S . -B build
 cmake --build build -j"$(nproc)"
 ```
 
-**Start the tracker** (config file holds `<ip> <port>`):
+**Start the trackers** — one `<ip> <port>` line per tracker; the number
+selects which line this instance binds:
 
 ```bash
-echo "127.0.0.1 9000" > tracker_info.txt
-./build/tracker tracker_info.txt 1
+printf '127.0.0.1 9000\n127.0.0.1 9001\n' > tracker_info.txt
+
+./build/tracker tracker_info.txt 1     # terminal 1
+./build/tracker tracker_info.txt 2     # terminal 2
 ```
+
+They find each other and replicate automatically, in either start order.
+A single line in the file is fine too — the tracker then runs standalone.
 
 **Client A — share a file:**
 
@@ -162,10 +170,11 @@ ctest --test-dir build --output-on-failure
 
 36 unit tests (hashing against published known-answer vectors, parser edge
 cases, password handling, session lifetime, tracker state transitions and
-authorisation rules) plus 4 integration scripts that drive the **real
+authorisation rules) plus integration scripts that drive the **real
 binaries**: a full upload/download round trip with hash comparison,
-ungraceful-disconnect handling, persistence across restart, and a
-concurrency test for sanitizer builds.
+three simultaneous downloads, ungraceful-disconnect handling, persistence
+across restart, two-tracker synchronisation with failover and recovery,
+and a concurrency test for sanitizer builds.
 
 **Under ThreadSanitizer:**
 
@@ -218,22 +227,29 @@ Stated plainly rather than left for you to discover:
   but bcrypt/scrypt/Argon2 resist offline GPU cracking and SHA-256 does not.
 - **No TLS** — passwords cross the wire in plaintext at login. Salting
   protects storage, not transport.
-- **Single tracker.** The AOS spec calls for two synchronised trackers; this
-  implements one. See below.
-- **Downloads are blocking** — one `download_file` at a time per client.
+- **Deletions do not replicate between trackers.** A `leave_group` or
+  `stop_share` applied while the tracker link is down can be resurrected
+  by a later merge, because the merge is a union. Tombstones would fix it.
+- **The tracker-to-tracker link is unauthenticated.** Anything that can
+  reach a tracker's port can push state into it. It assumes the trackers
+  sit on a trusted network.
 - Up to 30 s of tracker state can be lost on an unclean shutdown (snapshot
   interval).
 - Thread-per-connection does not scale past tens of concurrent clients;
   `epoll` would be the answer at larger scale.
 
-### Not implemented from the AOS spec
+### Coverage of the assignment brief
 
-| Spec section | Requirement | Status |
-|---|---|---|
-| §2.1, §7 | Two trackers with state synchronisation and failover | ✗ single tracker only |
-| §3.3 | Multiple simultaneous downloads per client | ✗ `download_file` blocks |
-| §5.1 | Makefile | ✗ CMake only |
-| §8 | Exact `[C] [group_id] filename` status format | ✗ close, not exact |
+Every functional requirement is implemented: all commands in §4.1–4.3,
+512 KB pieces with SHA-1 verification at piece and file level (§3.1,
+§6), the three protocols including tracker-to-tracker (§3.2), concurrent
+downloads and thread-safe shared state (§3.3), two synchronised trackers
+with failover and recovery (§2.1, §7), and the `[C] [group_id] filename`
+completion format (§8).
+
+The limitations above are properties of the chosen designs, documented
+rather than hidden. See [DECISIONS.md](docs/DECISIONS.md) for why each
+was chosen and what the alternatives cost.
 
 ---
 

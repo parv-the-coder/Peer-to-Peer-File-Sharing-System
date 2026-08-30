@@ -11,12 +11,15 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <memory>
 #include <thread>
 #include <vector>
 
 #include "common/hash.h"
 #include "common/message.h"
 #include "common/socket_io.h"
+#include "common/config.h"
+#include "tracker/peer_link.h"
 #include "tracker/session_manager.h"
 #include "tracker/tracker_state.h"
 
@@ -70,13 +73,36 @@ static string socket_peer_ip(int fd)
 // Previously every privileged command took a bare <username> string and
 // the tracker simply believed it, so any connected client could act as
 // any user by naming them.
-static string dispatch(const vector<string> &comds, const string &peer_ip)
+static string dispatch(const vector<string> &comds, const string &peer_ip,
+                       const string &raw)
 {
     const string &cmd = comds[0];
     const size_t n = comds.size();
 
     static const string kAuthErr =
         "ERROR: AUTH_REQUIRED - session invalid or expired, please log in again";
+
+    // --- tracker-to-tracker replication ---
+    //
+    // Deliberately not behind the client session check: the peer is
+    // another tracker, not a logged-in user, and has no token to present.
+    // See docs/DECISIONS.md for why this link is unauthenticated and what
+    // that assumes about the deployment.
+    if (cmd == "SYNC_REQ")
+    {
+        return g_state.serialize();
+    }
+    if (cmd == "STATE")
+    {
+        // Payload is everything after the verb.
+        size_t sp = raw.find(' ');
+        if (sp == string::npos) return "ERR empty state";
+        if (!g_state.merge_from(raw.substr(sp + 1)))
+        {
+            return "ERR malformed state";
+        }
+        return "OK";
+    }
 
     // --- unauthenticated commands ---
 
@@ -259,9 +285,12 @@ void managepeer(int peersocket)
 
         // Log the verb only. The full line carries passwords on login and
         // session tokens on everything else, and this goes to the console.
-        cout << "Command from socket " << peersocket << ": " << comds[0] << endl;
+        if (comds[0] != "STATE" && comds[0] != "SYNC_REQ")
+        {
+            cout << "Command from socket " << peersocket << ": " << comds[0] << endl;
+        }
 
-        string reply = dispatch(comds, peer_ip);
+        string reply = dispatch(comds, peer_ip, buff);
 
         // Track the authenticated user so a dropped connection can be
         // cleaned up. Set only after the tracker itself accepted the login.
@@ -288,25 +317,37 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // reading tracker IP and port from config file
-    FILE *filconfig = fopen(argv[1], "r"); // opening file
-    if (!filconfig)
+    // Which tracker am I? The brief runs two, selected by number, with
+    // one "<ip> <port>" line per tracker in the config file. This
+    // previously ignored argv[2] entirely and always used the first line,
+    // so starting tracker 2 would try to bind tracker 1's port.
+    int tracker_no = 0;
+    if (!p2p::parse_int(argv[2], tracker_no) || tracker_no < 1)
     {
-        cout << "Failed to open tracker info file" << endl;
+        cout << "Tracker number must be a positive integer, got: " << argv[2]
+             << endl;
         return 1;
     }
 
-    char ipbuf[128], portbuf[32]; // buffers
-    if (fscanf(filconfig, "%127s %31s", ipbuf, portbuf) != 2)
+    vector<p2p::Endpoint> endpoints = p2p::load_endpoints(argv[1]);
+    if (endpoints.empty())
     {
-        cout << "Failed to read tracker info" << endl;
-        fclose(filconfig);
+        cout << "No usable tracker entries in " << argv[1] << endl;
+        return 1;
+    }
+    if (tracker_no > (int)endpoints.size())
+    {
+        cout << "Tracker " << tracker_no << " requested but " << argv[1]
+             << " only lists " << endpoints.size() << " tracker(s)" << endl;
         return 1;
     }
 
-    fclose(filconfig); // closing file
-    string serverip = ipbuf; // setting ip
-    string serverport = portbuf; // setting port
+    string serverip = endpoints[tracker_no - 1].ip;
+    string serverport = endpoints[tracker_no - 1].port;
+
+    // Snapshot per tracker, so two trackers on one machine do not fight
+    // over the same file.
+    g_snapshot_path = "tracker_state_" + to_string(tracker_no) + ".db";
 
     // TCP socket
     int serversock; // socket
@@ -335,11 +376,7 @@ int main(int argc, char *argv[])
     serveradd.sin_family = AF_INET;
     serveradd.sin_addr.s_addr = INADDR_ANY; // any address
     int port = 0;
-    if (!p2p::parse_int(serverport, port) || port <= 0 || port > 65535)
-    {
-        cout << "Invalid port in tracker info file: " << serverport << endl;
-        return 1;
-    }
+    p2p::parse_int(serverport, port); // validated by load_endpoints
     serveradd.sin_port = htons(port); // setting port
 
     if (bind(serversock, (struct sockaddr *)&serveradd, sizeof(serveradd)) < 0)
@@ -366,6 +403,24 @@ int main(int argc, char *argv[])
     cout << "Available Tracker Commands (from console):\n";
     cout << "   quit   -> Stop the tracker server\n";
     cout << "-----------------------------------------\n\n";
+
+    // Link to the other tracker, if the config names one. The link
+    // retries on its own, so the trackers can be started in either order
+    // and one can be restarted without touching the other.
+    unique_ptr<p2p::PeerLink> link;
+    for (size_t i = 0; i < endpoints.size(); ++i)
+    {
+        if ((int)i == tracker_no - 1) continue;
+        cout << "Replicating with tracker " << (i + 1) << " at "
+             << endpoints[i].ip << ":" << endpoints[i].port << endl;
+        link = make_unique<p2p::PeerLink>(g_state, endpoints[i]);
+        link->start();
+        break; // the brief specifies exactly two trackers
+    }
+    if (!link)
+    {
+        cout << "No peer tracker configured; running standalone." << endl;
+    }
 
     int incomsock; // incoming socket
     int length = sizeof(serveradd);

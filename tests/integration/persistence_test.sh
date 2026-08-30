@@ -29,10 +29,10 @@ printf 'create_user alice pw\nlogin alice pw\ncreate_group g1\nupload_file g1 %s
 kill -TERM $TPID 2>/dev/null
 sleep 1.5
 
-if [ ! -f "$WORK/tracker_state.db" ]; then
+if [ ! -f "$WORK/tracker_state_1.db" ]; then
   echo "FAIL: no snapshot written"; ls -la "$WORK"; exit 1
 fi
-echo "snapshot contents:"; sed 's/^/  /' "$WORK/tracker_state.db" | cut -c1-90
+echo "snapshot contents:"; sed 's/^/  /' "$WORK/tracker_state_1.db" | cut -c1-90
 
 # --- second run: state must come back ---
 run_tracker 2

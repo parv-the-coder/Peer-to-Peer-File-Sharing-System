@@ -127,6 +127,57 @@ that and is more machinery than this needs.
 
 ---
 
+## 5b. Tracker replication: symmetric union merge, no primary
+
+**Chosen:** both trackers are equal peers. Each accepts writes at any
+time, and a background link pushes its full serialised state to the other
+whenever its version counter moves. Convergence is by **union merge** —
+users, groups, members, applicants, files and seeders present on either
+side end up present on both.
+
+**Why no primary:** a primary-backup design needs leader election and a
+failover step, and during the changeover neither node can safely accept
+writes. The brief requires the system keep working while one tracker is
+down; with symmetric peers that is automatic, because either tracker
+alone is already fully functional.
+
+**Why full state rather than an operation log:** the state is a few KB.
+Shipping it whole makes replication *idempotent and order-independent* —
+re-sending the same state changes nothing — so a message lost to a
+dropped link needs no acknowledgement, sequence number or retry buffer.
+The next push carries it. The same property means a tracker rejoining
+after an outage uses exactly the same code path as a steady-state push;
+there is no separate recovery mode to get wrong.
+
+**Alternatives:** an operation log with sequence numbers is more
+bandwidth-efficient and would support deletion, at the cost of tracking
+per-peer acknowledgement and handling gaps. Raft or similar would give
+true linearizability and is far more machinery than two nodes at this scale
+justify.
+
+**Known downsides, both real:**
+
+- **Deletions do not replicate.** A `leave_group` or `stop_share` applied
+  while the link is down can be resurrected by a later merge, because a
+  union cannot distinguish "never seen" from "deleted". Tombstones with
+  timestamps would fix it.
+- **Concurrent conflicting writes both survive.** If the same group is
+  created on both trackers during a partition, the merge unions the
+  member sets rather than picking a winner. For this data that is the
+  benign outcome, but it is not last-writer-wins and should not be
+  described as such.
+
+**A bug worth recording:** the first implementation bumped the version
+counter on *every* merge, including one that changed nothing. Each push
+made the receiver look modified, so it pushed back, which made the sender
+look modified — the two trackers ping-ponged full state at each other
+forever and spun until both fell over. The merge now reports whether it
+actually altered anything, and only a real change bumps the version. The
+integration test asserts the trackers stay quiet while idle, so this
+cannot silently come back.
+
+---
+
 ## 6. SHA-1 for pieces, SHA-256 for passwords
 
 Deliberately different, because the threat models are different.

@@ -113,6 +113,28 @@ public:
   bool save_snapshot(const std::string &path) const;
   bool load_snapshot(const std::string &path);
 
+  // Serialised form of all state, in the snapshot record format. Shared
+  // by the on-disk snapshot and by tracker-to-tracker replication, so
+  // both use one format and one parser.
+  std::string serialize() const;
+
+  // Merges serialised state from the other tracker into this one. This
+  // is a union: users, groups, members, applicants, files and seeders
+  // present on either side end up present on both. It deliberately does
+  // not replicate deletions -- see docs/DECISIONS.md.
+  bool merge_from(const std::string &data);
+
+  // Bumped on every mutation. The replication thread uses it to tell
+  // whether anything needs pushing, instead of pushing on a timer
+  // regardless.
+  unsigned long long version() const;
+
+private:
+  std::string serialize_locked() const;
+  bool apply_records_locked(const std::string &data, bool replace,
+                            bool *changed);
+  unsigned long long version_ = 0;
+
 private:
   bool user_exists_locked(const std::string &name) const;
   bool group_exists_locked(const std::string &gid) const;

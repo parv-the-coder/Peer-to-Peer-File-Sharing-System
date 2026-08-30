@@ -25,6 +25,7 @@
 #include "client/peer_server.h"
 #include "client/tracker_client.h"
 #include "client/upload_registry.h"
+#include "common/config.h"
 #include "common/hash.h"
 #include "common/message.h"
 #include "common/socket_io.h"
@@ -112,28 +113,33 @@ int main(int argc, char *argv[])
         idx++;
     }
 
-    string serverip, serverport;
-    FILE *file = fopen(argv[2], "r");
-    if (!file) 
-    { 
-        cout << "Failed to open tracker info file" << endl; 
-        return 0; 
-    }
-    char ipbuf[128], portbuf[32];
-    
-    if (fscanf(file, "%127s %31s", ipbuf, portbuf) != 2) 
-    { 
-        cout << "Failed to read tracker info" << endl; fclose(file); 
-        return 0; 
-    }
-
-    fclose(file); 
-    serverip = ipbuf; 
-    serverport = portbuf; 
-
-    // connect to tracker
-    if (!tracker.connect_to(serverip, serverport))
+    // Try each tracker in turn. The brief runs two so the system keeps
+    // working while one is down; the client must therefore fail over
+    // rather than give up on the first entry.
+    vector<p2p::Endpoint> trackers = p2p::load_endpoints(argv[2]);
+    if (trackers.empty())
     {
+        cout << "No usable tracker entries in " << argv[2] << endl;
+        return 1;
+    }
+
+    bool linked = false;
+    for (size_t i = 0; i < trackers.size(); ++i)
+    {
+        if (tracker.connect_to(trackers[i].ip, trackers[i].port))
+        {
+            cout << "Connected to tracker " << (i + 1) << " at "
+                 << trackers[i].ip << ":" << trackers[i].port << endl;
+            linked = true;
+            break;
+        }
+        cout << "Tracker " << (i + 1) << " at " << trackers[i].ip << ":"
+             << trackers[i].port << " unreachable";
+        cout << (i + 1 < trackers.size() ? ", trying the next one...\n" : "\n");
+    }
+    if (!linked)
+    {
+        cout << "------- No tracker reachable -------" << endl;
         return 1;
     }
 

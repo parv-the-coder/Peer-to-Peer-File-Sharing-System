@@ -12,5 +12,5 @@ tracker/tracker
 
 # Runtime state produced by running the tracker/client
 *.downloading
-tracker_state.db
-tracker_state.db.tmp
+tracker_state*.db
+tracker_state*.db.tmp

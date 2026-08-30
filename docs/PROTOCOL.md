@@ -105,6 +105,41 @@ handed a dead address.
 
 ---
 
+## Tracker ↔ Tracker
+
+The replication link between the two trackers, over the same framing.
+
+| Message | Reply |
+|---|---|
+| `SYNC_REQ` | the sender's full serialised state |
+| `STATE <serialised state>` | `OK`, or `ERR <reason>` if the payload is malformed |
+
+The payload is the same record format the on-disk snapshot uses (`USER`,
+`GROUP`, `FILE`, `GFILE` lines), so there is one serialiser and one
+parser rather than two of each that can drift apart.
+
+On connecting, a tracker sends `SYNC_REQ` and merges the reply, which is
+how a tracker that was offline catches up. Thereafter it sends `STATE`
+whenever its own version counter moves. Merging is a **union**, which
+makes this idempotent and order-independent: re-sending identical state
+changes nothing, so a message lost when a link drops needs no
+acknowledgement or retransmission — the next push carries it.
+
+Only a merge that actually changed something bumps the receiver's
+version. Without that, every push would make the receiver look modified
+and it would push straight back, and the two trackers would exchange
+state forever.
+
+**These two messages are not authenticated.** They carry no session
+token, because the peer is another tracker rather than a logged-in user.
+Anything that can reach a tracker's listening port can therefore push
+state into it — the design assumes both trackers sit on a trusted
+network. A shared secret between trackers, or binding the replication
+listener to a private interface, would be the fix; neither is
+implemented. Recorded in `docs/DECISIONS.md` rather than left implicit.
+
+---
+
 ## Peer ↔ Peer
 
 One short-lived TCP connection per piece.

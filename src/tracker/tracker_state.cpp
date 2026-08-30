@@ -98,6 +98,7 @@ Result TrackerState::create_user(const std::string &username,
   peer.peername = username;
   peer.password = std::move(ph);
   peers_[username] = std::move(peer);
+  ++version_;
   return {true,
           "***** ID number " + username + " registered successfully! ******"};
 }
@@ -115,6 +116,7 @@ Result TrackerState::login(const std::string &username,
                        username + " ------"};
   }
   it->second.login(ip, port);
+  ++version_;
   return {true, "Successful Login for User ID " + username + "! ******\n"};
 }
 
@@ -125,6 +127,7 @@ Result TrackerState::logout(const std::string &username) {
     return {false, "------- No such User ID: " + username + " ------"};
   }
   it->second.logout();
+  ++version_;
   return {true,
           "***** User ID " + username + " logged out successfully ******"};
 }
@@ -143,6 +146,7 @@ Result TrackerState::create_group(const std::string &gid,
   grp.groupmaster = owner;
   grp.participants.insert(owner);
   groups_[gid] = std::move(grp);
+  ++version_;
   return {true,
           "******* Group creation successful. Assigned ID: " + gid + " *******"};
 }
@@ -162,6 +166,7 @@ Result TrackerState::join_group(const std::string &gid,
             "------- You have already joined this group: " + gid + " -------"};
   }
   it->second.applicants.insert(username);
+  ++version_;
   return {true,
           "******* Request to join group " + gid + " has been sent ******"};
 }
@@ -181,6 +186,7 @@ Result TrackerState::leave_group(const std::string &gid,
                        " -------"};
   }
   it->second.deluser(username);
+  ++version_;
   return {true, "****** Left group successfully. ID: " + gid + " ******"};
 }
 
@@ -228,6 +234,7 @@ Result TrackerState::accept_request(const std::string &gid,
                        ") has no pending requests -------"};
   }
   it->second.acceptreq(applicant);
+  ++version_;
   return {true, "******* Approval granted for User ID: " + applicant +
                     " *******"};
 }
@@ -252,6 +259,7 @@ Result TrackerState::reject_request(const std::string &gid,
                        ") has no pending requests -------"};
   }
   it->second.applicants.erase(applicant);
+  ++version_;
   return {true, "******* Request rejected for User ID: " + applicant +
                     " *******"};
 }
@@ -290,6 +298,7 @@ Result TrackerState::upload_file(const std::string &gid,
   fm.piece_hashes.resize(static_cast<size_t>(num_pieces));
   fm.peers.insert(uname);
   group_files_[gid].insert(fname);
+  ++version_;
   return {true, "******* File " + fname + " uploaded to group " + gid +
                     " successfully *******"};
 }
@@ -377,6 +386,7 @@ Result TrackerState::file_downloaded(const std::string &gid,
   if (mit != files_.end()) {
     mit->second.peers.insert(peername);
   }
+  ++version_;
   return {true, "SUCCESS: Peer " + peername + " registered as seeder for " +
                     fname};
 }
@@ -400,6 +410,7 @@ Result TrackerState::stop_share(const std::string &gid,
     return {false, "ERROR: File metadata not found"};
   }
   mit->second.peers.erase(peername);
+  ++version_;
   return {true, "SUCCESS: Peer " + peername + " stopped sharing " + fname +
                     " in group " + gid};
 }
@@ -412,6 +423,7 @@ void TrackerState::handle_disconnect(const std::string &username) {
   auto pit = peers_.find(username);
   if (pit != peers_.end()) {
     pit->second.logout();
+    ++version_;
   }
   // Group ownership is deliberately NOT handed off here. A dropped
   // connection is transient -- the owner restarting their client should

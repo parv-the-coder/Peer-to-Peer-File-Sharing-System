@@ -5,18 +5,20 @@ metadata, and **clients** transfer file data directly to each other. The
 tracker never sees file contents.
 
 ```
-                  ┌──────────────┐
-                  │   TRACKER    │   accounts, groups, file metadata,
-                  │              │   who currently has what
-                  └──────┬───────┘
-            control      │      control
-         ┌───────────────┴───────────────┐
-         │                               │
-   ┌─────┴──────┐                  ┌─────┴──────┐
-   │  CLIENT A  │◄────────────────►│  CLIENT B  │
-   └────────────┘   file pieces    └────────────┘
-                    (direct)
+        ┌──────────────┐   replication   ┌──────────────┐
+        │  TRACKER 1   │◄───────────────►│  TRACKER 2   │
+        └──────┬───────┘   (union merge) └───────┬──────┘
+               │                                 │
+      control  │      ┌──────────────────────────┘ failover
+               │      │
+        ┌──────┴──────┴┐                  ┌────────────┐
+        │   CLIENT A   │◄────────────────►│  CLIENT B  │
+        └──────────────┘   file pieces    └────────────┘
+                            (direct)
 ```
+
+Either tracker alone serves every command. Clients try each in turn, so
+one being down is invisible to them.
 
 ---
 
@@ -38,7 +40,8 @@ tracker never sees file contents.
 | `main` | Socket setup, accept loop, command dispatch, signal handling |
 | `tracker_state` | All mutable state (users, groups, files, group→file index) behind one lock |
 | `session_manager` | Token issue/lookup/revoke, with its own independent lock |
-| `persistence` | Snapshot save/load (implements two `TrackerState` methods) |
+| `persistence` | Serialisation, snapshot save/load, and the union merge |
+| `peer_link` | Background replication to the other tracker |
 
 ### `src/client/`
 
@@ -87,12 +90,28 @@ under the same one. Every authenticated command validates a token, so
 that lookup is the hottest read in the system; putting it behind the
 state lock would make it queue behind slow operations like `list_files`.
 
+### Replication
+
+A third tracker thread (`PeerLink`) keeps the other tracker in step. It
+dials the peer, pulls its state and merges it, then pushes this
+tracker's state whenever the version counter moves. Both trackers do
+this symmetrically; neither is a primary.
+
+Because the merge is a union, replication is idempotent and
+order-independent — re-sending identical state is a no-op — so a lost
+message needs no acknowledgement or retry buffer, and a tracker
+rejoining after an outage takes the same code path as a normal push.
+`TrackerState::version()` gates the push so idle trackers stay silent;
+without that gate the two ping-pong state at each other forever.
+
 ### Client
 
-- **CLI thread** — the REPL; also runs downloads synchronously
+- **CLI thread** — the REPL, which stays responsive during transfers
 - **Peer-server accept thread** — hands accepted sockets to the pool
 - **Peer-server worker pool** (4 threads) — serve `GET_PIECE`
-- **Download worker threads** (up to 8, transient) — fetch pieces in parallel
+- **Download threads** — one per `download_file`, so several files
+  transfer at once
+- **Download worker threads** (up to 8 per download) — fetch pieces in parallel
 
 `UploadRegistry` is shared between the CLI thread (which registers and
 removes files) and every peer-server worker (which reads it). It was an
