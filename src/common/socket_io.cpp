@@ -23,7 +23,13 @@ bool send_all(int fd, const void *buf, size_t n) {
   size_t total = 0;
   const char *p = static_cast<const char *>(buf);
   while (total < n) {
-    ssize_t s = send(fd, p + total, n - total, 0);
+    // MSG_NOSIGNAL is not optional here. Writing to a socket whose peer
+    // has gone away raises SIGPIPE, whose default action is to terminate
+    // the process -- so a peer disconnecting at the wrong moment killed
+    // the whole tracker or client rather than failing this one write.
+    // With the flag the call returns EPIPE instead and the caller sees a
+    // false return, which every caller already handles.
+    ssize_t s = send(fd, p + total, n - total, MSG_NOSIGNAL);
     if (s <= 0) {
       return false;
     }

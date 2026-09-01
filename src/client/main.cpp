@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <openssl/evp.h>
 #include <atomic>
+#include <csignal>
 
 #include "client/downloader.h"
 #include "client/peer_server.h"
@@ -93,11 +94,15 @@ void logincheck(function<void()> action)
 
 int main(int argc, char *argv[])
 {
-    if (argc != 3) 
-    { 
-        cout << "----- Invalid Arguments ------" << endl; 
-        return 0; 
-    } 
+    // Belt and braces alongside MSG_NOSIGNAL in send_all: a peer hanging
+    // up must never take this process down.
+    signal(SIGPIPE, SIG_IGN);
+
+    if (argc != 3)
+    {
+        cout << "----- Invalid Arguments ------" << endl;
+        return 0;
+    }
     logout_local(); // logout
 
     string hostip, hostport;

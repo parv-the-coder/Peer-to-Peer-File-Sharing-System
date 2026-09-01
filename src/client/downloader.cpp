@@ -518,7 +518,12 @@ string Downloader::report() const
   for (const auto &pair : downloads_)
   {
     const DownloadInfo &info = pair.second;
-    bool completed = true;
+    // A download that has only just started has no piece list yet -- it
+    // is still fetching metadata from the tracker. Treating that as
+    // "every piece is done" would report a brand new download as
+    // COMPLETED, which is what the vacuous all-of-empty check did.
+    bool started = !info.piece_status.empty();
+    bool completed = started;
     for (int status : info.piece_status)
     {
       if (status != 2) { completed = false; break; }
@@ -544,7 +549,11 @@ string Downloader::report() const
       else if (status == 2) done++;
       else if (status == 3) failed++;
     }
-    if (completed)
+    if (!started)
+    {
+      out << "PREPARING (fetching metadata)";
+    }
+    else if (completed)
     {
       out << "COMPLETED";
     }

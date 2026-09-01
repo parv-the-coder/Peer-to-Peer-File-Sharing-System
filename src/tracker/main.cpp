@@ -311,6 +311,10 @@ void managepeer(int peersocket)
 
 int main(int argc, char *argv[])
 {
+    // Belt and braces alongside MSG_NOSIGNAL in send_all: nothing in
+    // this process should ever die from a peer hanging up.
+    signal(SIGPIPE, SIG_IGN);
+
     if (argc != 3)
     {
         cout << "-----Invalid Arguments-----" << endl;
