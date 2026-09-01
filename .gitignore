@@ -6,6 +6,13 @@
 client/client
 tracker/tracker
 
+# Course material - kept locally, deliberately not published
+AOS-Assignment-3.pdf
+*_Assignment*.pdf
+
+# Superseded by docs/ - described the pre-rewrite version of the project
+Report.pdf
+
 # Editor / tooling
 /.vscode
 /.history
