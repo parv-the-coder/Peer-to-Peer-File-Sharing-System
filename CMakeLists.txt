@@ -40,6 +40,8 @@ add_executable(client
   src/client/tracker_client.cpp
   src/client/downloader.cpp
   src/client/commands.cpp
+  src/client/http_server.cpp
+  src/client/web_ui.cpp
 )
 target_link_libraries(client PRIVATE p2p_common)
 
@@ -62,7 +64,7 @@ if(P2P_BUILD_TESTS)
   add_test(NAME unit COMMAND unit_tests)
 
   # Integration tests drive the real binaries, so they need them built.
-  foreach(t e2e disconnect persistence concurrent_download tracker_sync)
+  foreach(t e2e disconnect persistence concurrent_download tracker_sync web_ui)
     add_test(NAME ${t}
              COMMAND ${CMAKE_COMMAND} -E env bash
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/${t}_test.sh)

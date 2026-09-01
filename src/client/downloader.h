@@ -52,6 +52,11 @@ public:
   // Human-readable summary of active and completed downloads.
   std::string report() const;
 
+  // Snapshot of every tracked download, for the web interface. Returns a
+  // copy rather than a reference so callers never read the live map
+  // without the lock.
+  std::vector<DownloadInfo> snapshot() const;
+
   // Joins every outstanding download thread. Called on exit.
   void wait_all();
 

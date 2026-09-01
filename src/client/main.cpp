@@ -14,6 +14,8 @@
 #include <csignal>
 
 #include "client/commands.h"
+#include "client/http_server.h"
+#include "client/web_ui.h"
 #include "client/downloader.h"
 #include "client/peer_server.h"
 #include "client/tracker_client.h"
@@ -38,11 +40,18 @@ int main(int argc, char *argv[])
     // up must never take this process down.
     signal(SIGPIPE, SIG_IGN);
 
-    if (argc != 3) 
-    { 
-        cout << "----- Invalid Arguments ------" << endl; 
-        return 0; 
-    } 
+    if (argc < 3 || argc > 4)
+    {
+        cout << "Usage: client <ip>:<port> <tracker_info_file> [web_port]" << endl;
+        return 1;
+    }
+    int web_port = 0;
+    if (argc == 4 && (!p2p::parse_int(argv[3], web_port) || web_port < 1 || web_port > 65535))
+    {
+        cout << "Invalid dashboard port: " << argv[3] << endl;
+        return 1;
+    }
+
 
     string hostip, hostport;
     int idx = 0;
@@ -98,6 +107,24 @@ int main(int argc, char *argv[])
     p2p::Downloader downloader(tracker, uploaded_files);
 
     p2p::CommandProcessor processor(tracker, uploaded_files, downloader, hostport);
+
+    // Optional local dashboard. Off unless a port is given, so the plain
+    // CLI stays exactly as it was.
+    p2p::HttpServer web;
+    if (web_port > 0)
+    {
+        p2p::register_web_ui(web, processor, downloader, hostport);
+        if (web.start(web_port))
+        {
+            cout << "Dashboard: http://127.0.0.1:" << web_port << endl;
+        }
+        else
+        {
+            cout << "Could not start dashboard on port " << web_port
+                 << " (in use?). Continuing without it." << endl;
+        }
+    }
+
     cout << p2p::CommandProcessor::help();
 
     while (true)
@@ -122,6 +149,7 @@ int main(int argc, char *argv[])
     }
 
     cout << "------- Exiting Client ---------" << endl;
+    web.stop();
     downloader.wait_all(); // let in-flight downloads finish
     tracker.disconnect();
     server.stop();

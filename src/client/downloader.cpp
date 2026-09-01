@@ -509,6 +509,16 @@ void Downloader::wait_all() {
   }
 }
 
+std::vector<DownloadInfo> Downloader::snapshot() const {
+  lock_guard<mutex> lock(mtx_);
+  vector<DownloadInfo> out;
+  out.reserve(downloads_.size());
+  for (const auto &kv : downloads_) {
+    out.push_back(kv.second);
+  }
+  return out;
+}
+
 string Downloader::report() const
 {
   lock_guard<mutex> lock(mtx_);
