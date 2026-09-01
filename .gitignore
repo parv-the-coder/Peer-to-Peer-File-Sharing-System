@@ -1,5 +1,5 @@
 # Build output
-/build/
+/build*/
 /temp
 
 # Compiled binaries (built via CMake into build/, not committed)
@@ -14,3 +14,6 @@ tracker/tracker
 *.downloading
 tracker_state*.db
 tracker_state*.db.tmp
+
+/docs/
+/.github/

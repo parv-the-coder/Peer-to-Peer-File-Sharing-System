@@ -23,8 +23,11 @@ wait_for_tracker() {
 TPORT=$((40000 + RANDOM % 20000))
 echo "127.0.0.1 $TPORT" > "$WORK/tracker_info.txt"
 
-TSAN_OPTIONS="halt_on_error=0 log_path=$WORK/tsan" \
-  ( cd "$WORK" && exec setarch -R "$ROOT/$BUILD/tracker" "$WORK/tracker_info.txt" 1 ) > "$WORK/tracker.log" 2>&1 &
+# The env assignment goes inside the subshell: bash does not accept a
+# VAR=value prefix on a ( ... ) group.
+( cd "$WORK" \
+  && export TSAN_OPTIONS="halt_on_error=0 log_path=$WORK/tsan" \
+  && exec setarch -R "$ROOT/$BUILD/tracker" "$WORK/tracker_info.txt" 1 ) > "$WORK/tracker.log" 2>&1 &
 TPID=$!
 wait_for_tracker "$WORK/tracker.log" || { echo "tracker failed to start"; cat "$WORK/tracker.log"; exit 1; }
 
