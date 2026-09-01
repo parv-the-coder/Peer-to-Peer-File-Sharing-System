@@ -34,6 +34,7 @@ and a remotely triggerable crash. See [what changed](#what-the-rewrite-fixed).
 | **Swarm** | A client that finishes a download automatically becomes a seeder |
 | **Progress** | `show_downloads` reports per-file piece counts and status |
 | **Durability** | Tracker state snapshotted atomically and restored on restart |
+| **Dashboard** | Optional browser UI with live progress bars, driven by the same command layer as the CLI |
 | **Replication** | Two trackers keep synchronised state; either alone serves every command, and one rejoining after an outage catches up automatically |
 | **Failover** | Clients try each tracker in turn, so one tracker being down is invisible |
 | **Robustness** | Dead peers stop being advertised; malformed input is rejected rather than crashing |
@@ -112,6 +113,20 @@ show_downloads
 Type `commands` for the full list, `exit` to quit, `quit` in the tracker
 console to shut it down.
 
+### Dashboard (optional)
+
+Pass a third argument to open a browser dashboard for that client:
+
+```bash
+./build/client 127.0.0.1:6001 tracker_info.txt 8080
+# then open http://127.0.0.1:8080
+```
+
+Everything the CLI can do, the dashboard can do — it posts to a single
+endpoint that calls the *same* `CommandProcessor::execute` the REPL calls,
+so the two cannot drift and the dashboard cannot reach an action the CLI
+would refuse. It binds **loopback only** and is off unless you ask for it.
+
 ### Command reference
 
 | Command | Purpose |
@@ -150,6 +165,7 @@ tests/         36 unit tests + 4 integration scripts
 | `SessionManager` — token → session, **its own mutex** | Every authenticated command validates a token, making it the hottest read in the system. Kept off the state lock so it never queues behind a slow `list_files`. |
 | `FileMeta` keyed by **(group, filename)** | Keyed by filename alone, an upload to one group silently overwrote another group's same-named file. |
 | `UploadRegistry` — mutex-guarded filename → path | Read by every peer-serving thread while the CLI thread mutates it. |
+| `CommandProcessor` — one `execute()` for every caller | The REPL and the dashboard share it, so there is no second copy of the login checks to keep in step. |
 | Piece-status vector + `.downloading` sidecar | Makes downloads resumable; written after each piece. |
 
 ### Protocol in one line
@@ -157,8 +173,7 @@ tests/         36 unit tests + 4 integration scripts
 Every message on both protocols is `[4-byte big-endian length][payload]`.
 Length-prefixing is what makes a message spanning multiple TCP segments
 safe — the original code assumed one `read()` returned one whole message,
-which silently truncated large messages. Full grammar in
-[docs/PROTOCOL.md](docs/PROTOCOL.md).
+which silently truncated large messages.
 
 ---
 
@@ -233,6 +248,10 @@ Stated plainly rather than left for you to discover:
 - **The tracker-to-tracker link is unauthenticated.** Anything that can
   reach a tracker's port can push state into it. It assumes the trackers
   sit on a trusted network.
+- **The dashboard has no authentication of its own.** It inherits the
+  client's session, so anything able to reach its port can act as that
+  logged-in user. That is why it binds loopback only and stays off unless
+  a port is passed.
 - Up to 30 s of tracker state can be lost on an unclean shutdown (snapshot
   interval).
 - Thread-per-connection does not scale past tens of concurrent clients;
@@ -248,16 +267,4 @@ with failover and recovery (§2.1, §7), and the `[C] [group_id] filename`
 completion format (§8).
 
 The limitations above are properties of the chosen designs, documented
-rather than hidden. See [DECISIONS.md](docs/DECISIONS.md) for why each
-was chosen and what the alternatives cost.
-
----
-
-## Documentation
-
-| | |
-|---|---|
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, thread model, locking strategy, transfer walkthrough |
-| [PROTOCOL.md](docs/PROTOCOL.md) | Exact wire format for both protocols |
-| [DECISIONS.md](docs/DECISIONS.md) | Every significant choice, the alternatives, the known downsides |
-| [INTERVIEW_PREP.md](docs/INTERVIEW_PREP.md) | The defects fixed and how each was proven |
+rather than hidden.
