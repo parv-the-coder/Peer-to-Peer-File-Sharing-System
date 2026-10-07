@@ -23,7 +23,8 @@ namespace p2p {
 //
 // The trade-off is that deletions do not replicate -- a leave_group or
 // stop_share that happens while the link is down can be resurrected by a
-// later merge. Recording tombstones would fix it; see docs/DECISIONS.md.
+// later merge. Recording tombstones would fix it; see
+// docs/DECISIONS.md section 6.
 //
 // The thread reconnects on its own, so trackers can be started in either
 // order and a tracker that dies can rejoin without operator action.

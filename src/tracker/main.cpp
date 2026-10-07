@@ -86,8 +86,8 @@ static string dispatch(const vector<string> &comds, const string &peer_ip,
     //
     // Deliberately not behind the client session check: the peer is
     // another tracker, not a logged-in user, and has no token to present.
-    // See docs/DECISIONS.md for why this link is unauthenticated and what
-    // that assumes about the deployment.
+    // See docs/DECISIONS.md section 6 for why this link is unauthenticated
+    // and what that assumes about the deployment.
     if (cmd == "SYNC_REQ")
     {
         return g_state.serialize();

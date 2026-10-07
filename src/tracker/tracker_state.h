@@ -121,7 +121,7 @@ public:
   // Merges serialised state from the other tracker into this one. This
   // is a union: users, groups, members, applicants, files and seeders
   // present on either side end up present on both. It deliberately does
-  // not replicate deletions -- see docs/DECISIONS.md.
+  // not replicate deletions -- see docs/DECISIONS.md section 6.
   bool merge_from(const std::string &data);
 
   // Bumped on every mutation. The replication thread uses it to tell

@@ -22,5 +22,11 @@ Report.pdf
 tracker_state*.db
 tracker_state*.db.tmp
 
-/docs/
+# Personal interview prep - kept locally, not published.
+# The project docs in docs/ (ARCHITECTURE, PROTOCOL, DECISIONS, TESTING)
+# are published.
+/docs/INTERVIEW_PREP.md
+/docs/interview/
+P2P_FULL.md
+
 /.github/
